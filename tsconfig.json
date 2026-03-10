@@ -1,0 +1,13 @@
+“`json
+{
+  “exclude”: [
+    “node_modules”,
+    “dist”,
+    “datasets”,
+    “re”,
+    “node_modules”,
+    “config”,
+    “vllm_client”,
+  ]
+}
+“`

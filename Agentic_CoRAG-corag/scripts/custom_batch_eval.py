@@ -55,19 +55,19 @@ def check_hit(retrieved_docs: List[str], golden_facts: List[str]) -> Tuple[int, 
     
     # To count hits unique per golden fact (i.e., did we retrieve this fact?)
     # We iterate over golden facts and check if ANY retrieved doc covers it.
-    for g in norm_gold:
+    for golden_fact in norm_gold:
         is_hit = False
-        if not g: continue # Skip empty golden facts
-        for r in norm_retr:
-            if not r: continue
+        if not golden_fact: continue # Skip empty golden facts
+        for retrieved_doc in norm_retr:
+            if not retrieved_doc: continue
             
             # Condition 1: Golden in Retrieved
-            if g in r:
+            if golden_fact in retrieved_doc:
                 is_hit = True
                 break
             
             # Condition 2: Retrieved in Golden (Significant fragment)
-            if r in g and len(r) > 0.5 * len(g):
+            if retrieved_doc in golden_fact and len(retrieved_doc) > 0.5 * len(golden_fact):
                 is_hit = True
                 break
         
@@ -127,7 +127,9 @@ def run_custom_eval(args: Arguments):
     else:
         model_id = get_vllm_model_id(api_base=args.vllm_api_base, api_key=args.vllm_api_key)
     
-    vllm_client: VllmClient = VllmClient(model=model_id, api_base=args.vllm_api_base, api_key=args.vllm_api_key)
+    vllm_client: VllmClient = VllmClient(
+        model=model_id, api_base=args.vllm_api_base, api_key=args.vllm_api_key
+        )
     
     final_vllm_client: VllmClient = None
     if args.final_answer_model or args.final_answer_api_base:

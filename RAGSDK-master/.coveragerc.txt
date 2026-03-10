@@ -1,0 +1,6 @@
+[run]
+omit =
+    */libs/*
+    */evaluate/*
+    */train_data_generator.py
+
