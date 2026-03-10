@@ -5,11 +5,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import json
 import time
-import argparse
-import copy
 import logging
 import threading
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
@@ -20,16 +18,19 @@ sys.path.insert(0, src_path)
 
 from transformers import HfArgumentParser, AutoTokenizer, PreTrainedTokenizerFast
 from datasets import Dataset
-
 from config import Arguments
-from logger_config import logger
 from data_utils import load_corpus, format_documents_for_final_answer
 from vllm_client import VllmClient, get_vllm_model_id
 from agent import CoRagAgent, RagPath
 from search.search_utils import search_by_http, search_by_graph_api
 from utils import AtomicCounter
 import re
+from logger_config import logger
 
+logging.getLogger("openai").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("httpcore").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
 
 def load_tokenizer_safely(tokenizer_name: str) -> PreTrainedTokenizerFast:
     """Load tokenizer with better offline handling and clearer diagnostics."""
@@ -78,9 +79,11 @@ def check_hit(retrieved_docs: List[str], golden_facts: List[str]) -> Tuple[int, 
     # We iterate over golden facts and check if ANY retrieved doc covers it.
     for golden_fact in norm_gold:
         is_hit = False
-        if not golden_fact: continue # Skip empty golden facts
+        if not golden_fact:
+            continue
         for retrieved_doc in norm_retr:
-            if not retrieved_doc: continue
+            if not retrieved_doc:
+                continue
             
             # Condition 1: Golden in Retrieved
             if golden_fact in retrieved_doc:
@@ -136,9 +139,6 @@ def get_golden_facts(item: Dict[str, Any]) -> List[str]:
                 facts.append(sentences[sent_idx])
     
     return facts
-
-# Suppress httpx logging
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 def run_custom_eval(args: Arguments):
     # Initialize components
@@ -220,13 +220,9 @@ def run_custom_eval(args: Arguments):
 
     processed_cnt = AtomicCounter()
     total_cnt = len(data_items)
+    failed_cnt = AtomicCounter()
     
-    # Metrics for timing
-    total_infer_time = 0.0
-    
-    results = []
-    
-    def process_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    def process_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         question = item.get('question', '')
         ground_truth = item.get('answer', '')
         # Fallback if keys are different
@@ -410,6 +406,7 @@ def run_custom_eval(args: Arguments):
                 if res:
                     results_map[index] = res
             except Exception as e:
+                failed_cnt.increment()
                 logger.error(f"Error processing item at index {index}: {e}")
                 import traceback
                 traceback.print_exc()
@@ -419,6 +416,12 @@ def run_custom_eval(args: Arguments):
     for i in range(len(data_items)):
         if i in results_map:
             processed_results.append(results_map[i])
+
+    if not processed_results:
+        raise RuntimeError(
+            f"All {total_cnt} items failed during evaluation. "
+            f"Please check vLLM service connectivity, API base configuration, and retriever endpoints."
+        )
 
     # Calculate average stats
     total_q2t = 0
@@ -452,6 +455,7 @@ def run_custom_eval(args: Arguments):
     avg_summary = {
         "type": "Summary",
         "total_samples": num_samples,
+        "failed_samples": failed_cnt.value,
         "avg_q2t_time": total_q2t / num_samples if num_samples > 0 else 0,
         "avg_ppr_time": total_ppr / num_samples if num_samples > 0 else 0,
         "avg_reranker_time": total_reranker / num_samples if num_samples > 0 else 0,

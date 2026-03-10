@@ -154,12 +154,13 @@ class CoRagAgent:
         )
         self._truncate_long_messages(messages, max_length=max_message_length)
 
-        self._truncate_long_messages(messages, max_length=max_message_length)
-
         client = self.final_vllm_client if self.final_vllm_client else self.vllm_client
         return client.call_chat(messages=messages, **kwargs)
 
     def _truncate_long_messages(self, messages: List[Dict], max_length: int):
+        if self.tokenizer is None:
+            return
+
         for msg in messages:
             if len(msg['content']) < 2 * max_length:
                 continue

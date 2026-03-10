@@ -48,7 +48,7 @@ class Arguments(TrainingArguments):
     # available: greedy, tree_search, best_of_n
     decode_strategy: str = field(default='greedy', metadata={'help': 'decoding strategy'})
     best_n: int = field(default=4, metadata={'help': 'best of n'})
-    graph_api_url: Optional[str] = field(default='http://10.170.22.103:8024/retrieve', metadata={'help': 'URL for the graph retrieval API'})
+    graph_api_url: Optional[str] = field(default=None, metadata={'help': 'URL for the graph retrieval API'})
     corpus_file: Optional[str] = field(default=None, metadata={'help': 'Path to the corpus file (json)'})
     vllm_api_base: str = field(default=URL_72B, metadata={'help': 'VLLM API base URL'}) #finetuned url:http://10.70.113.80:8023/v1
     vllm_api_key: str = field(default="token-123", metadata={'help': 'VLLM API key'})
@@ -56,11 +56,11 @@ class Arguments(TrainingArguments):
     tokenizer_name: Optional[str] = field(default='Qwen/Qwen3-8B', metadata={'help': 'Tokenizer name or path. If not provided, uses the vLLM model ID.'})
     
     final_answer_model: Optional[str] = field(default=None, metadata={'help': 'Model ID for final answer generation.'})
-    final_answer_api_base: Optional[str] = field(default=URL_72B_2, metadata={'help': 'API base URL for final answer model.'})
+    final_answer_api_base: Optional[str] = field(default=None, metadata={'help': 'API base URL for final answer model.'})
     final_answer_api_key: Optional[str] = field(default=None, metadata={'help': 'API key for final answer model.'})
     
     sub_answer_model: Optional[str] = field(default=None, metadata={'help': 'Model ID for sub-answer generation.'})
-    sub_answer_api_base: Optional[str] = field(default=URL_72B, metadata={'help': 'API base URL for sub-answer model.'})
+    sub_answer_api_base: Optional[str] = field(default=None, metadata={'help': 'API base URL for sub-answer model.'})
     sub_answer_api_key: Optional[str] = field(default=None, metadata={'help': 'API key for sub-answer model.'})
 
     def __post_init__(self):
