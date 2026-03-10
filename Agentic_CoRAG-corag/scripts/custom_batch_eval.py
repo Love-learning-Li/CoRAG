@@ -30,6 +30,27 @@ from search.search_utils import search_by_http, search_by_graph_api
 from utils import AtomicCounter
 import re
 
+
+def load_tokenizer_safely(tokenizer_name: str) -> PreTrainedTokenizerFast:
+    """Load tokenizer with better offline handling and clearer diagnostics."""
+    # If a local directory is provided, force local load to avoid unnecessary hub access.
+    if os.path.isdir(tokenizer_name):
+        return AutoTokenizer.from_pretrained(tokenizer_name, local_files_only=True)
+
+    try:
+        return AutoTokenizer.from_pretrained(tokenizer_name)
+    except Exception as first_error:
+        # Retry in local-only mode in case files are already cached.
+        try:
+            return AutoTokenizer.from_pretrained(tokenizer_name, local_files_only=True)
+        except Exception:
+            raise RuntimeError(
+                "Failed to load tokenizer. If this environment cannot access huggingface.co, "
+                "please set --tokenizer_name to a local tokenizer directory, "
+                "or pre-download/cache the model files. "
+                f"Current tokenizer_name: {tokenizer_name}"
+            ) from first_error
+
 def normalize_text(s: str) -> str:
     """Lower text and remove punctuation, articles and extra whitespace."""
     s = s.lower()
@@ -169,7 +190,7 @@ def run_custom_eval(args: Arguments):
     logger.info("Initializing Agent...")
     tokenizer_name = args.tokenizer_name if args.tokenizer_name else model_id
     try:
-        tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(tokenizer_name)
+        tokenizer: PreTrainedTokenizerFast = load_tokenizer_safely(tokenizer_name)
     except Exception as e:
         logger.error(f"Failed to load tokenizer from '{tokenizer_name}'.")
         raise e
@@ -455,12 +476,6 @@ def run_custom_eval(args: Arguments):
     logger.info("Done!")
 
 if __name__ == "__main__":
-    parser = HfArgumentParser((Arguments,))
-    # Parse known args, allowing for extra args that might be handled differently
-    args, unknown = parser.parse_args_into_dataclasses(return_remaining_strings=True)
-    if unknown:
-        logger.warning(f"Unknown arguments: {unknown}")
-    
     # Define script-specific arguments separate from the main configuration
     from dataclasses import dataclass, field
     
