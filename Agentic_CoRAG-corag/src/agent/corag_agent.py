@@ -44,6 +44,13 @@ def _clean_answer_entity(answer: str) -> str:
     for separator in separators:
         if separator in cleaned:
             cleaned = cleaned.split(separator)[0].strip()
+    # Strip leading honorific titles so subqueries use bare entity names
+    honorific_prefix = (
+        r'^(?:Queen|King|Emperor|Empress|Prince|Princess|Grand\s+Duke|Grand\s+Duchess|'
+        r'Duke|Duchess|Count|Earl|Baron|Baroness|Lord|Lady|Dame|Sir|'
+        r'Tsar|Tsarina|Sultan|Pope|Saint|St\.)\s+'
+    )
+    cleaned = re.sub(honorific_prefix, '', cleaned, flags=re.IGNORECASE).strip()
     return cleaned
 
 
@@ -98,6 +105,13 @@ class CoRagAgent:
     def _plan_next_subquery(self, query: str, past_subanswers: List[str]) -> Optional[str]:
         cleaned_query = query.strip()
 
+        # All rule-based patterns below are strictly 2-hop decompositions.
+        # If we have already completed 2 or more hops, do NOT fire the rule planner
+        # again — doing so would incorrectly treat the step-2 answer as a new pivot
+        # entity and generate a spurious step-3 subquery.
+        if len(past_subanswers) >= 2:
+            return None
+
         two_hop_patterns = [
             (r"^Who is the father-in-law of (?P<entity>.+?)\?$", lambda entity, resolved: f"Who is {entity}'s spouse?" if not resolved else f"Who is {resolved}'s father?"),
             (r"^Who is (?P<entity>.+?)'s father-in-law\?$", lambda entity, resolved: f"Who is {entity}'s spouse?" if not resolved else f"Who is {resolved}'s father?"),
@@ -118,6 +132,16 @@ class CoRagAgent:
             (r"^Which country (?P<entity>.+?)'s (?P<relation>father|mother|husband|wife) is from\?$", lambda entity, resolved, relation=None: f"Who is {entity}'s {relation}?" if not resolved else f"Which country {resolved} is from?"),
             (r"^Which award the (?P<role>.+?) of (?P<entity>.+?) received\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Which award {resolved} received?"),
             (r"^What is the award that the (?P<role>.+?) of (?P<entity>.+?) (?:received|earned|won|got)\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Which award {resolved} received?"),
+            # --- Missing patterns for "[attribute] of [role] of [entity]" ---
+            (r"^What nationality is the (?P<role>.+?) of (?P<entity>.+?)\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"What nationality is {resolved}?"),
+            (r"^Which country (?:is )?the (?P<role>.+?) of (?P<entity>.+?) (?:is )?from\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Which country is {resolved} from?"),
+            (r"^What is the date of birth of the (?P<role>.+?) of (?P<entity>.+?)\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"What is the date of birth of {resolved}?"),
+            (r"^What is the date of death of the (?P<role>.+?) of (?P<entity>.+?)\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"What is the date of death of {resolved}?"),
+            (r"^Where did the (?P<role>.+?) of (?P<entity>.+?) die\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Where did {resolved} die?"),
+            (r"^Where was the (?P<role>.+?) of (?P<entity>.+?) born\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Where was {resolved} born?"),
+            (r"^Where does the (?P<role>.+?) of (?P<entity>.+?) work(?: at)?\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Where does {resolved} work at?"),
+            (r"^Where was the place of birth of the (?P<role>.+?) of (?P<entity>.+?)\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Where was {resolved} born?"),
+            (r"^Where was the place of death of the (?P<role>.+?) of (?P<entity>.+?)\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Where did {resolved} die?"),
         ]
 
         resolved_entity = _clean_answer_entity(past_subanswers[-1]) if past_subanswers else ''
@@ -174,6 +198,11 @@ class CoRagAgent:
 
                 subquery_raw: str = self.vllm_client.call_chat(messages=messages, temperature=subquery_temp, **kwargs)
                 subquery, thought = _normalize_subquery(subquery_raw)
+
+                # Early-stop: LLM signals that enough information has been gathered
+                if subquery.strip().upper() == '[STOP]':
+                    logger.debug("LLM issued [STOP] signal — ending subquery loop early.")
+                    break
 
             if subquery in past_subqueries:
                 subquery_temp = max(subquery_temp, 0.7)
