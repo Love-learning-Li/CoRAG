@@ -10,7 +10,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from logger_config import logger
 from vllm_client import VllmClient, get_vllm_model_id
-from search.search_utils import search_by_http, search_by_graph_api
+from search.search_utils import search_with_variants
 from data_utils import format_input_context, parse_answer_logprobs
 from prompts import get_generate_subquery_prompt, get_generate_intermediate_answer_prompt, get_generate_final_answer_prompt
 from agent.agent_utils import RagPath
@@ -32,6 +32,19 @@ def _normalize_subquery(subquery: str) -> Tuple[str, Optional[str]]:
         subquery = re.sub(r'^Intermediate query \d+: ', '', subquery)
 
     return subquery, thought
+
+
+def _clean_answer_entity(answer: str) -> str:
+    cleaned = re.sub(r'\s+', ' ', answer).strip().strip('.').strip()
+    if not cleaned:
+        return ''
+    if cleaned.lower().startswith('no relevant information found'):
+        return ''
+    separators = [';', ' or ', ' and ', ', and ', ',']
+    for separator in separators:
+        if separator in cleaned:
+            cleaned = cleaned.split(separator)[0].strip()
+    return cleaned
 
 
 class CoRagAgent:
@@ -82,6 +95,47 @@ class CoRagAgent:
                 
         self.lock = threading.Lock()
 
+    def _plan_next_subquery(self, query: str, past_subanswers: List[str]) -> Optional[str]:
+        cleaned_query = query.strip()
+
+        two_hop_patterns = [
+            (r"^Who is the father-in-law of (?P<entity>.+?)\?$", lambda entity, resolved: f"Who is {entity}'s spouse?" if not resolved else f"Who is {resolved}'s father?"),
+            (r"^Who is (?P<entity>.+?)'s father-in-law\?$", lambda entity, resolved: f"Who is {entity}'s spouse?" if not resolved else f"Who is {resolved}'s father?"),
+            (r"^Who is the maternal grandmother of (?P<entity>.+?)\?$", lambda entity, resolved: f"Who is {entity}'s mother?" if not resolved else f"Who is {resolved}'s mother?"),
+            (r"^Who is the paternal grandmother of (?P<entity>.+?)\?$", lambda entity, resolved: f"Who is {entity}'s father?" if not resolved else f"Who is {resolved}'s mother?"),
+            (r"^Who is the maternal grandfather of (?P<entity>.+?)\?$", lambda entity, resolved: f"Who is {entity}'s mother?" if not resolved else f"Who is {resolved}'s father?"),
+            (r"^Who is the paternal grandfather of (?P<entity>.+?)\?$", lambda entity, resolved: f"Who is {entity}'s father?" if not resolved else f"Who is {resolved}'s father?"),
+            (r"^Who is (?P<entity>.+?)'s stepmother\?$", lambda entity, resolved: f"Who is {entity}'s father?" if not resolved else f"Who is {resolved}'s spouse?"),
+            (r"^Who is the stepmother of (?P<entity>.+?)\?$", lambda entity, resolved: f"Who is {entity}'s father?" if not resolved else f"Who is {resolved}'s spouse?"),
+            (r"^Who is the child of the (?P<role>.+?) of (?P<entity>.+?)\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Who is {resolved}'s child?"),
+            (r"^What is the date of birth of (?P<entity>.+?)'s (?P<relation>father|mother|husband|wife)\?$", lambda entity, resolved, relation=None: f"Who is {entity}'s {relation}?" if not resolved else f"What is the date of birth of {resolved}?"),
+            (r"^What is the date of death of (?P<entity>.+?)'s (?P<relation>father|mother|husband|wife)\?$", lambda entity, resolved, relation=None: f"Who is {entity}'s {relation}?" if not resolved else f"What is the date of death of {resolved}?"),
+            (r"^Where did (?P<entity>.+?)'s (?P<relation>father|mother|husband|wife) die\?$", lambda entity, resolved, relation=None: f"Who is {entity}'s {relation}?" if not resolved else f"Where did {resolved} die?"),
+            (r"^Where was the place of death of (?P<entity>.+?)'s (?P<relation>father|mother|husband|wife)\?$", lambda entity, resolved, relation=None: f"Who is {entity}'s {relation}?" if not resolved else f"Where did {resolved} die?"),
+            (r"^Where was the place of birth of (?P<entity>.+?)'s (?P<relation>father|mother|husband|wife)\?$", lambda entity, resolved, relation=None: f"Who is {entity}'s {relation}?" if not resolved else f"Where was {resolved} born?"),
+            (r"^Where does (?P<entity>.+?)'s (?P<relation>father|mother|husband|wife) work at\?$", lambda entity, resolved, relation=None: f"Who is {entity}'s {relation}?" if not resolved else f"Where does {resolved} work at?"),
+            (r"^What nationality is (?P<entity>.+?)'s (?P<relation>father|mother|husband|wife)\?$", lambda entity, resolved, relation=None: f"Who is {entity}'s {relation}?" if not resolved else f"What nationality is {resolved}?"),
+            (r"^Which country (?P<entity>.+?)'s (?P<relation>father|mother|husband|wife) is from\?$", lambda entity, resolved, relation=None: f"Who is {entity}'s {relation}?" if not resolved else f"Which country {resolved} is from?"),
+            (r"^Which award the (?P<role>.+?) of (?P<entity>.+?) received\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Which award {resolved} received?"),
+            (r"^What is the award that the (?P<role>.+?) of (?P<entity>.+?) (?:received|earned|won|got)\?$", lambda entity, resolved, role=None: f"Who is the {role} of {entity}?" if not resolved else f"Which award {resolved} received?"),
+        ]
+
+        resolved_entity = _clean_answer_entity(past_subanswers[-1]) if past_subanswers else ''
+
+        for pattern, builder in two_hop_patterns:
+            match = re.match(pattern, cleaned_query, flags=re.IGNORECASE)
+            if not match:
+                continue
+            groups = match.groupdict()
+            entity = groups.get('entity', '').strip()
+            if 'role' in groups:
+                return builder(entity, resolved_entity, groups['role'].strip())
+            if 'relation' in groups:
+                return builder(entity, resolved_entity, groups['relation'].strip())
+            return builder(entity, resolved_entity)
+
+        return None
+
     def sample_path(
             self, query: str, task_desc: str,
             max_path_length: int = 3,
@@ -104,17 +158,22 @@ class CoRagAgent:
         num_llm_calls: int = 0
         max_num_llm_calls: int = 4 * (max_path_length - len(past_subqueries))
         while len(past_subqueries) < max_path_length and num_llm_calls < max_num_llm_calls:
-            num_llm_calls += 1
-            messages: List[Dict] = get_generate_subquery_prompt(
-                query=query,
-                past_subqueries=past_subqueries,
-                past_subanswers=past_subanswers,
-                task_desc=task_desc,
-            )
-            self._truncate_long_messages(messages, max_length=max_message_length)
+            planned_subquery = self._plan_next_subquery(query=query, past_subanswers=past_subanswers)
+            if planned_subquery and planned_subquery not in past_subqueries:
+                subquery = planned_subquery
+                thought = None
+            else:
+                num_llm_calls += 1
+                messages: List[Dict] = get_generate_subquery_prompt(
+                    query=query,
+                    past_subqueries=past_subqueries,
+                    past_subanswers=past_subanswers,
+                    task_desc=task_desc,
+                )
+                self._truncate_long_messages(messages, max_length=max_message_length)
 
-            subquery_raw: str = self.vllm_client.call_chat(messages=messages, temperature=subquery_temp, **kwargs)
-            subquery, thought = _normalize_subquery(subquery_raw)
+                subquery_raw: str = self.vllm_client.call_chat(messages=messages, temperature=subquery_temp, **kwargs)
+                subquery, thought = _normalize_subquery(subquery_raw)
 
             if subquery in past_subqueries:
                 subquery_temp = max(subquery_temp, 0.7)
@@ -190,8 +249,14 @@ class CoRagAgent:
     def _get_subanswer_and_doc_ids(
             self, subquery: str, max_message_length: int = 4096
     ) -> Tuple[str, List, List[str]]:
+        retriever_results = search_with_variants(
+            query=subquery,
+            graph_api_url=self.graph_api_url,
+            max_variants=4,
+            per_query_limit=5,
+        )
+
         if self.graph_api_url:
-            retriever_results = search_by_graph_api(query=subquery, url=self.graph_api_url)
             documents = []
             doc_ids = []
             for res in retriever_results:
@@ -204,7 +269,6 @@ class CoRagAgent:
                     doc_ids.append(str(res.get('id') or res.get('doc_id') or 'graph_chunk'))
             documents = documents[::-1]
         else:
-            retriever_results: List[Dict] = search_by_http(query=subquery)
             doc_ids: List[str] = [res['doc_id'] for res in retriever_results]
             documents: List[str] = [format_input_context(self.corpus[int(doc_id)]) for doc_id in doc_ids][::-1]
         messages: List[Dict] = get_generate_intermediate_answer_prompt(

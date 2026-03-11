@@ -9,7 +9,16 @@ def get_generate_subquery_prompt(query: str, past_subqueries: List[str], past_su
 Intermediate answer {idx + 1}: {past_subanswers[idx]}\n"""
     past = past.strip()
 
-    prompt = f"""You are using a search engine to answer the main query by iteratively searching the web. Given the following intermediate queries and answers, generate a new simple follow-up question that can help answer the main query. You may rephrase or decompose the main query when previous answers are not helpful. Ask simple follow-up questions only as the search engine may not understand complex questions.
+    prompt = f"""You are using a search engine to answer the main query by iteratively searching the web. Given the following intermediate queries and answers, generate exactly one new simple follow-up question that helps answer the main query.
+
+Rules:
+- Ask for exactly one missing fact in one hop.
+- Preserve the relation direction from the main query. Do not swap father with grandfather, spouse with parent, or person with parent-in-law.
+- Preserve the target attribute exactly. For example, do not replace nationality with workplace, country with headquarters city, or mother with maternal grandmother.
+- For kinship questions, first resolve the directly needed relative, then ask for the next relation on that resolved person.
+- For comparison questions, ask for the same canonical attribute for each entity separately before comparing.
+- Keep the query short and retrieval-friendly.
+- Do not explain yourself and do not output multiple questions.
 
 ## Previous intermediate queries and answers
 {past or 'Nothing yet'}
@@ -20,7 +29,7 @@ Intermediate answer {idx + 1}: {past_subanswers[idx]}\n"""
 ## Main query to answer
 {query}
 
-Respond with a simple follow-up question that will help answer the main query, do not explain yourself or output anything else."""
+Respond with one simple follow-up question only."""
 
     messages: List[Dict] = [
         {'role': 'user', 'content': prompt}
@@ -33,7 +42,14 @@ def get_generate_intermediate_answer_prompt(subquery: str, documents: List[str])
     for idx, doc in enumerate(documents):
         context += f"""{doc}\n\n"""
 
-    prompt = f"""Given the following documents, generate an appropriate answer for the query. DO NOT hallucinate any information, only use the provided documents to generate the answer. Respond "No relevant information found" if the documents do not contain useful information.
+    prompt = f"""Given the following documents, generate an appropriate answer for the query.
+
+Rules:
+- DO NOT hallucinate. Only use the provided documents.
+- If the query asks for a single person, place, date, country, employer, or award, answer with the single best-supported value only.
+- Do not list multiple candidates unless the query explicitly asks for multiple answers.
+- Prefer the canonical short answer span from the documents.
+- Respond "No relevant information found" if the documents do not contain useful information.
 
 ## Documents
 {context.strip()}
