@@ -7,6 +7,7 @@ import json
 import time
 import logging
 import threading
+from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -140,7 +141,28 @@ def get_golden_facts(item: Dict[str, Any]) -> List[str]:
     
     return facts
 
+
+def align_save_file_with_eval_split(eval_file: str, save_file: str) -> str:
+    eval_name = Path(eval_file).name.lower()
+    save_path = Path(save_file)
+    dataset_tag = "small" if "small" in eval_name else "full"
+    opposite_tag = "full" if dataset_tag == "small" else "small"
+
+    stem = save_path.stem
+    suffix = save_path.suffix
+    if opposite_tag in stem.lower():
+        pattern = re.compile(opposite_tag, flags=re.IGNORECASE)
+        new_stem = pattern.sub(dataset_tag, stem, count=1)
+        aligned = str(save_path.with_name(new_stem + suffix))
+        logger.warning(
+            f"save_file name split tag mismatched eval_file. "
+            f"Auto-adjusted save path from {save_file} to {aligned}"
+        )
+        return aligned
+    return save_file
+
 def run_custom_eval(args: Arguments):
+    args.save_file = align_save_file_with_eval_split(args.eval_file, args.save_file)
     # Initialize components
     logger.info("Initializing VLLM Client...")
     if args.vllm_model:
@@ -523,15 +545,19 @@ def run_custom_eval(args: Arguments):
         if args.enable_naive_retrieval:
              avg_summary["naive_micro_recall"] = total_naive_hits / total_gold_chunks if total_gold_chunks > 0 else 0.0
     
-    processed_results.insert(0, avg_summary)
-    
     # Save results
     logger.info(f"Saving results to {args.save_file}...")
     # Ensure directory exists
     os.makedirs(os.path.dirname(args.save_file), exist_ok=True)
-    
+
+    payload = {
+        "format_version": "v2",
+        "summary": avg_summary,
+        "results": processed_results,
+    }
+
     with open(args.save_file, 'w', encoding='utf-8') as f:
-        json.dump(processed_results, f, ensure_ascii=False, indent=4)
+        json.dump(payload, f, ensure_ascii=False, indent=4)
         
     logger.info("Done!")
 

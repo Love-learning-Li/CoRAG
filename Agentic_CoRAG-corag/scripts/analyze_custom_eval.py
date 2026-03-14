@@ -72,7 +72,7 @@ def extract_model_answer(text: Optional[str]) -> str:
     cleaned = re.sub(r'^\s*(?:Final Answer|SubAnswer|SubQuery|Answer)\s*:\s*', '', cleaned, flags=re.IGNORECASE).strip()
     cleaned = strip_wrapping_quotes(cleaned)
     lowered = cleaned.lower()
-    if not cleaned or lowered == 'no relevant information found':
+    if not cleaned or lowered in {'no relevant information found', 'unable to determine.', 'unable to determine', 'cannot determine', 'unknown'}:
         return 'No relevant information found'
     if lowered in {'yes', 'no', 'insufficient information'}:
         return lowered
@@ -409,12 +409,20 @@ def load_eval_file(file_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]
     with file_path.open("r", encoding="utf-8") as handle:
         content = json.load(handle)
 
-    if not isinstance(content, list) or not content:
-        raise ValueError("Evaluation file must be a non-empty list.")
+    if isinstance(content, dict):
+        summary = content.get("summary", {}) if isinstance(content.get("summary", {}), dict) else {}
+        samples_raw = content.get("results", [])
+        if not isinstance(samples_raw, list) or not samples_raw:
+            raise ValueError("Evaluation object must contain a non-empty results list.")
+        samples = [item for item in samples_raw if isinstance(item, dict)]
+        return summary, samples
 
-    summary = content[0] if isinstance(content[0], dict) and content[0].get("type") == "Summary" else {}
-    samples = [item for item in content if isinstance(item, dict) and item.get("type") != "Summary"]
-    return summary, samples
+    if isinstance(content, list) and content:
+        summary = content[0] if isinstance(content[0], dict) and content[0].get("type") == "Summary" else {}
+        samples = [item for item in content if isinstance(item, dict) and item.get("type") != "Summary"]
+        return summary, samples
+
+    raise ValueError("Evaluation file must be either a v2 object with summary/results or a non-empty legacy list.")
 
 
 def build_report(summary: Dict[str, Any], samples: List[Dict[str, Any]], top_k: int, failure_top_k: int) -> Dict[str, Any]:
@@ -432,6 +440,7 @@ def build_report(summary: Dict[str, Any], samples: List[Dict[str, Any]], top_k: 
             "avg_llm_call_time in the original summary corresponds to final answer generation time, not total LLM time across all sub-steps.",
             "Predictions are normalized to strip SubQuery/SubAnswer/Final Answer wrappers before answer-quality scoring.",
             "Retrieval diagnostics now separate first-hop failure, rewrite salvage, relation drift, category-specific failure rates, and result-format anomalies.",
+            "The analyzer supports both legacy list output ([Summary, sample1, ...]) and v2 object output ({summary, results}).",
         ],
     }
 

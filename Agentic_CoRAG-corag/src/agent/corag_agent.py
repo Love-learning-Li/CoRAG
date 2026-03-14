@@ -48,7 +48,7 @@ def _normalize_subanswer(subanswer: str) -> str:
     cleaned = re.sub(r'^(SubAnswer|Answer)\s*:\s*', '', cleaned, flags=re.IGNORECASE).strip()
     if cleaned.lower() in {'yes', 'no', 'insufficient information'}:
         return cleaned.lower()
-    if not cleaned or cleaned.lower() == 'no relevant information found':
+    if not cleaned or cleaned.lower() in {'no relevant information found', 'unable to determine.', 'unable to determine', 'cannot determine', 'unknown'}:
         return 'No relevant information found'
     return cleaned
 
@@ -73,11 +73,18 @@ def _extract_final_answer(raw_answer: str) -> str:
 
     text = re.sub(r'^(Final Answer|Answer)\s*:\s*', '', text, flags=re.IGNORECASE).strip()
 
-    if 'no relevant information found' in text.lower():
+    lowered = text.lower().strip()
+    if lowered in {'unable to determine.', 'unable to determine', 'cannot determine', 'unknown'}:
         return 'No relevant information found'
-    if text.lower() in {'yes', 'no', 'insufficient information'}:
-        return text.lower()
+    if 'no relevant information found' in lowered:
+        return 'No relevant information found'
+    if lowered in {'yes', 'no', 'insufficient information'}:
+        return lowered
     return text
+
+
+def _is_no_info_answer(text: str) -> bool:
+    return _normalize_subanswer(text) == 'No relevant information found'
 
 
 def _sanitize_followup_subquery(subquery: str) -> str:
@@ -114,25 +121,43 @@ def _clean_answer_entity(answer: str) -> str:
 
 
 def _extract_comparison_entities(query: str) -> Optional[Tuple[str, str, str]]:
+    attr = _comparison_attribute_from_query(query)
+    if not attr:
+        return None
+
     comparison_patterns = [
-        (
-            r'^(?:Are both|Do both|Did both|Were both)\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s*,?\s*(?:from|born in|of)?\s*the same (?P<attribute>country|place|nationality).*\?$',
-            lambda m: (m.group('left').strip(), m.group('right').strip(), m.group('attribute').strip()),
-        ),
-        (
-            r'^(?:Are|Do|Did|Were)\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s+of the same (?P<attribute>nationality|country|place)\?$',
-            lambda m: (m.group('left').strip(), m.group('right').strip(), m.group('attribute').strip()),
-        ),
-        (
-            r'^(?:Do both directors of films|Do both movies|Are both movies|Did the movies|Do director of film)\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s+.*same (?P<attribute>nationality|country|place).*\?$',
-            lambda m: (m.group('left').strip(), m.group('right').strip(), m.group('attribute').strip()),
-        ),
+        r'^(?:Are both|Were both)\s+(?:movies|films|songs)?\,?\s*(?P<left>.+?)\s+and\s+(?P<right>.+?)\,?\s+(?:from|of|born in)\s+the same .*\?$',
+        r'^(?:Did|Do) the (?:movies|films)\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\,?\s+(?:originate|originated)\s+from\s+the same .*\?$',
+        r'^(?:Did|Do) both (?:movies|films)\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\,?\s+(?:originate|originated)\s+from\s+the same .*\?$',
+        r'^(?:Are|Do|Did|Were)\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s+of the same .*\?$',
+        r'^(?:Do|Are|Did|Were) both\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s+.*same .*\?$',
     ]
-    for pattern, builder in comparison_patterns:
+    for pattern in comparison_patterns:
         match = re.match(pattern, query, flags=re.IGNORECASE)
         if match:
-            left, right, attribute = builder(match)
-            return left, right, attribute.lower()
+            left = match.group('left').strip().strip(' ,')
+            right = match.group('right').strip().strip(' ,')
+            left = re.sub(r'^(?:movies|films|songs)\s*,?\s*', '', left, flags=re.IGNORECASE)
+            right = re.sub(r'\s+(?:movies|films|songs)\b.*$', '', right, flags=re.IGNORECASE)
+            right = re.sub(r'\s+(?:have|that|who)\b.*$', '', right, flags=re.IGNORECASE)
+            return left, right, attr
+
+    role_match = re.match(
+        r'^(?:Are|Do|Did|Were)\s+(?P<left_prefix>director|composer|performer)\s+of\s+(?:film|movie|song)\s+(?P<left>.+?)\s+and\s+(?P<right_prefix>director|composer|performer)\s+of\s+(?:film|movie|song)\s+(?P<right>.+?)\s+.*$',
+        query,
+        flags=re.IGNORECASE,
+    )
+    if role_match and role_match.group('left_prefix').lower() == role_match.group('right_prefix').lower():
+        return role_match.group('left').strip().strip(' ,?'), role_match.group('right').strip().strip(' ,?'), attr
+
+    role_tail_match = re.match(
+        r'^(?:Do|Are|Did|Were)\s+both\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s+(?:films|movies|songs)\s+have\s+the\s+(?P<role>directors?|composers?|performers?)\s+.*$',
+        query,
+        flags=re.IGNORECASE,
+    )
+    if role_tail_match:
+        return role_tail_match.group('left').strip().strip(' ,'), role_tail_match.group('right').strip().strip(' ,'), attr
+
     return None
 
 
@@ -283,7 +308,23 @@ def _extract_direct_relation_query(query: str) -> Optional[Tuple[str, str]]:
     for pattern in patterns:
         match = re.match(pattern, query, flags=re.IGNORECASE)
         if match:
-            return match.group('entity').strip(), match.group('relation').strip().lower()
+            entity = match.group('entity').strip()
+            lowered_entity = entity.lower()
+            if any(token in lowered_entity for token in ['director of', 'composer of', 'performer of', 'author of', 'writer of']):
+                return None
+            return entity, match.group('relation').strip().lower()
+    return None
+
+
+def _extract_role_relation_question(query: str) -> Optional[Tuple[str, str, str]]:
+    patterns = [
+        r'^Who is the (?P<relation>father|mother|child|son|daughter|spouse|husband|wife) of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series)\s+(?P<title>.+?)\?$',
+        r'^Who is the (?P<relation>child|son|daughter) of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series)\s+(?P<title>.+?)\?$',
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, query, flags=re.IGNORECASE)
+        if match:
+            return match.group('relation').lower(), match.group('role').lower(), match.group('title').strip()
     return None
 
 
@@ -362,6 +403,8 @@ class CoRagAgent:
 
     def _minimum_generic_steps(self, query: str) -> int:
         required = 1
+        if _extract_role_relation_question(query):
+            required = max(required, 2)
         if _extract_role_attribute_question(query):
             required = max(required, 2)
         if _extract_possessive_relation_attribute(query):
@@ -376,12 +419,20 @@ class CoRagAgent:
         return required
 
     def _minimum_dataset_specific_steps(self, query: str) -> int:
-        if re.search(r'father-in-law|mother-in-law|maternal grandmother|maternal grandfather|paternal grandmother|paternal grandfather', query, flags=re.IGNORECASE):
+        if re.search(r'father-in-law|mother-in-law|maternal grandmother|maternal grandfather|paternal grandmother|paternal grandfather|stepmother|stepfather', query, flags=re.IGNORECASE):
             return 2
         return 1
 
     def _plan_generic_subquery(self, query: str, past_subqueries: List[str], past_subanswers: List[str]) -> Optional[str]:
         step = len(past_subqueries)
+
+        role_relation = _extract_role_relation_question(query)
+        if role_relation:
+            relation, role, title = role_relation
+            if step == 0:
+                return _role_query(role, title)
+            if step == 1 and past_subanswers:
+                return f"Who is {_clean_answer_entity(past_subanswers[0])}'s {relation}?"
 
         role_attribute = _extract_role_attribute_question(query)
         if role_attribute:
@@ -443,20 +494,30 @@ class CoRagAgent:
             subject = re.sub(r'^Who is the father-in-law of (.+?)\?$', r'\1', query, flags=re.IGNORECASE).strip()
             if step == 0:
                 return f"Who is {subject}'s spouse?"
+            if step == 1 and past_subanswers and _is_no_info_answer(past_subanswers[0]):
+                return f"Who is the spouse of {subject}?"
             if step == 1 and past_subanswers:
                 return f"Who is {_clean_answer_entity(past_subanswers[0])}'s father?"
+            if step == 2 and len(past_subanswers) >= 2 and _is_no_info_answer(past_subanswers[1]):
+                return f"Who was {subject}'s spouse?"
 
         if re.search(r'mother-in-law', query, flags=re.IGNORECASE):
             subject = re.sub(r'^Who is the mother-in-law of (.+?)\?$', r'\1', query, flags=re.IGNORECASE).strip()
             if step == 0:
                 return f"Who is {subject}'s spouse?"
+            if step == 1 and past_subanswers and _is_no_info_answer(past_subanswers[0]):
+                return f"Who is the spouse of {subject}?"
             if step == 1 and past_subanswers:
                 return f"Who is {_clean_answer_entity(past_subanswers[0])}'s mother?"
+            if step == 2 and len(past_subanswers) >= 2 and _is_no_info_answer(past_subanswers[1]):
+                return f"Who was {subject}'s spouse?"
 
         if re.search(r'maternal grandmother', query, flags=re.IGNORECASE):
             subject = re.sub(r'^Who is the maternal grandmother of (.+?)\?$', r'\1', query, flags=re.IGNORECASE).strip()
             if step == 0:
                 return f"Who is {subject}'s mother?"
+            if step == 1 and past_subanswers and _is_no_info_answer(past_subanswers[0]):
+                return f"Who is the mother of {subject}?"
             if step == 1 and past_subanswers:
                 return f"Who is {_clean_answer_entity(past_subanswers[0])}'s mother?"
 
@@ -464,6 +525,8 @@ class CoRagAgent:
             subject = re.sub(r'^Who is the maternal grandfather of (.+?)\?$', r'\1', query, flags=re.IGNORECASE).strip()
             if step == 0:
                 return f"Who is {subject}'s mother?"
+            if step == 1 and past_subanswers and _is_no_info_answer(past_subanswers[0]):
+                return f"Who is the mother of {subject}?"
             if step == 1 and past_subanswers:
                 return f"Who is {_clean_answer_entity(past_subanswers[0])}'s father?"
 
@@ -471,6 +534,8 @@ class CoRagAgent:
             subject = re.sub(r'^Who is the paternal grandmother of (.+?)\?$', r'\1', query, flags=re.IGNORECASE).strip()
             if step == 0:
                 return f"Who is {subject}'s father?"
+            if step == 1 and past_subanswers and _is_no_info_answer(past_subanswers[0]):
+                return f"Who is the father of {subject}?"
             if step == 1 and past_subanswers:
                 return f"Who is {_clean_answer_entity(past_subanswers[0])}'s mother?"
 
@@ -478,8 +543,28 @@ class CoRagAgent:
             subject = re.sub(r'^Who is the paternal grandfather of (.+?)\?$', r'\1', query, flags=re.IGNORECASE).strip()
             if step == 0:
                 return f"Who is {subject}'s father?"
+            if step == 1 and past_subanswers and _is_no_info_answer(past_subanswers[0]):
+                return f"Who is the father of {subject}?"
             if step == 1 and past_subanswers:
                 return f"Who is {_clean_answer_entity(past_subanswers[0])}'s father?"
+
+        if re.search(r'stepmother', query, flags=re.IGNORECASE):
+            subject = re.sub(r'^Who is (?P<entity>.+?)\'s stepmother\?$', r'\g<entity>', query, flags=re.IGNORECASE).strip()
+            if step == 0:
+                return f"Who is {subject}'s father?"
+            if step == 1 and past_subanswers and _is_no_info_answer(past_subanswers[0]):
+                return f"Who is the father of {subject}?"
+            if step == 1 and past_subanswers:
+                return f"Who is {_clean_answer_entity(past_subanswers[0])}'s spouse?"
+
+        if re.search(r'stepfather', query, flags=re.IGNORECASE):
+            subject = re.sub(r'^Who is (?P<entity>.+?)\'s stepfather\?$', r'\g<entity>', query, flags=re.IGNORECASE).strip()
+            if step == 0:
+                return f"Who is {subject}'s mother?"
+            if step == 1 and past_subanswers and _is_no_info_answer(past_subanswers[0]):
+                return f"Who is the mother of {subject}?"
+            if step == 1 and past_subanswers:
+                return f"Who is {_clean_answer_entity(past_subanswers[0])}'s spouse?"
 
         return None
 
