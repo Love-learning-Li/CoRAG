@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 class RetrieveInput(BaseModel):
     query: str
+    top_k: int = 10
     # depth: int
     # max_passages: int
 
@@ -133,7 +134,7 @@ async def root():
 @app.post("/retrieve")
 async def retrieve(input: RetrieveInput):
     logger.info(f"Retrieve: {input.query}")
-    response = rag.retrieve(input.query)
+    response = rag.retrieve(input.query, max_passages=max(1, input.top_k))
     logger.info(f"context: {json.dumps(response)}")
     return response
 

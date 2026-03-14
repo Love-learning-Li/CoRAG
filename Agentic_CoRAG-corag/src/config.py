@@ -39,10 +39,17 @@ class Arguments(TrainingArguments):
     URL_8B = 'http://10.170.22.103/v1'
     # available: 'forward', 'backward', 'random'
     context_placement: str = field(default='backward', metadata={'help': 'context placement strategy'})
-    num_contexts: int = field(default=15, metadata={"help": "number of context passages for each example"})
+    num_contexts: int = field(default=20, metadata={"help": "number of context passages for each example"})
     num_threads: int = field(default=30, metadata={"help": "number of threads for retriever search"})
-    max_path_length: int = field(default=3, metadata={"help": "maximum path length"})
+    max_path_length: int = field(default=4, metadata={"help": "maximum path length"})
     sample_temperature: float = field(default=0.7, metadata={"help": "temperature for sampling paths"})
+    retrieval_max_variants: int = field(default=4, metadata={"help": "maximum number of query rewrite variants for retrieval"})
+    retrieval_per_query_limit: int = field(default=8, metadata={"help": "maximum number of hits kept per retrieval query variant"})
+    retrieval_service_top_k: int = field(default=10, metadata={"help": "top_k sent to the retrieval service before local truncation"})
+    enable_deterministic_planner: bool = field(default=True, metadata={"help": "enable deterministic subquery planning before falling back to LLM planning"})
+    enable_generic_deterministic_rules: bool = field(default=True, metadata={"help": "enable generic deterministic multi-hop rules that are intended to generalize across datasets"})
+    enable_dataset_specific_rules: bool = field(default=False, metadata={"help": "enable dataset-specific deterministic rules for benchmark-oriented optimization"})
+    dataset_rule_profile: str = field(default="none", metadata={"help": "dataset-specific rule profile, e.g. none or 2wiki"})
 
     eval_metrics: str = field(default='em_and_f1', metadata={'help': 'evaluation metrics'})
     # available: greedy, tree_search, best_of_n
@@ -58,7 +65,7 @@ class Arguments(TrainingArguments):
     final_answer_model: Optional[str] = field(default=None, metadata={'help': 'Model ID for final answer generation.'})
     final_answer_api_base: Optional[str] = field(default=None, metadata={'help': 'API base URL for final answer model.'})
     final_answer_api_key: Optional[str] = field(default=None, metadata={'help': 'API key for final answer model.'})
-    
+
     sub_answer_model: Optional[str] = field(default=None, metadata={'help': 'Model ID for sub-answer generation.'})
     sub_answer_api_base: Optional[str] = field(default=None, metadata={'help': 'API base URL for sub-answer model.'})
     sub_answer_api_key: Optional[str] = field(default=None, metadata={'help': 'API key for sub-answer model.'})

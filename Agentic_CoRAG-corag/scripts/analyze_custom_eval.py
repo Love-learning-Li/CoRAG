@@ -5,10 +5,27 @@ import re
 import string
 from pathlib import Path
 from statistics import mean, median
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
-DEFAULT_EVAL_FILE = Path(r"G:/大学资料/3_研0/InternProject/CoRAG/Agentic_CoRAG-corag/eval/rejection_sampled_data_small_eval_out.json")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EVAL_CANDIDATES = [
+    "2wikimultihopqa_hard_full_eval_out_3_13.json",
+    "2wikimultihopqa_hard_full_eval_output_3_13_17_43.json",
+    "2wikimultihopqa_hard_full_eval_out.json",
+]
+
+
+def resolve_default_eval_file() -> Path:
+    eval_dir = REPO_ROOT / "eval"
+    for filename in DEFAULT_EVAL_CANDIDATES:
+        candidate = eval_dir / filename
+        if candidate.exists():
+            return candidate
+    return eval_dir / DEFAULT_EVAL_CANDIDATES[0]
+
+
+DEFAULT_EVAL_FILE = resolve_default_eval_file()
 
 
 def normalize_squad(text: str) -> str:
@@ -28,6 +45,38 @@ def normalize_squad(text: str) -> str:
         return " ".join(value.split())
 
     return white_space_fix(remove_articles(remove_punc(lower(text))))
+
+
+def strip_wrapping_quotes(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1].strip()
+    return text
+
+
+def extract_model_answer(text: Optional[str]) -> str:
+    if text is None:
+        return ""
+
+    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    for label in ("Final Answer:", "SubAnswer:", "SubQuery:"):
+        pattern = re.compile(
+            rf'{re.escape(label)}\s*(.*?)(?=(?:\n\s*(?:SubQuery|SubAnswer|Final Answer)\s*:)|$)',
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        matches = pattern.findall(cleaned)
+        if matches:
+            cleaned = matches[-1].strip()
+            break
+
+    cleaned = re.sub(r'^\s*(?:Final Answer|SubAnswer|SubQuery|Answer)\s*:\s*', '', cleaned, flags=re.IGNORECASE).strip()
+    cleaned = strip_wrapping_quotes(cleaned)
+    lowered = cleaned.lower()
+    if not cleaned or lowered == 'no relevant information found':
+        return 'No relevant information found'
+    if lowered in {'yes', 'no', 'insufficient information'}:
+        return lowered
+    return cleaned
 
 
 def exact_match_score(prediction: str, ground_truth: str) -> float:
@@ -66,7 +115,9 @@ def contains_match(prediction: str, ground_truth: str) -> float:
     norm_gt = normalize_squad(ground_truth)
     if not norm_pred or not norm_gt:
         return 0.0
-    return float(norm_gt in norm_pred or norm_pred in norm_gt)
+    padded_pred = f" {norm_pred} "
+    padded_gt = f" {norm_gt} "
+    return float(padded_gt in padded_pred or padded_pred in padded_gt)
 
 
 def percentile(values: List[float], p: float) -> float:
@@ -84,18 +135,6 @@ def percentile(values: List[float], p: float) -> float:
     return sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
 
 
-def summarize_times(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
-    path_times = [sample["time"][2] for sample in samples]
-    final_times = [sample["time"][3] for sample in samples]
-    total_times = [sample["time"][2] + sample["time"][3] for sample in samples]
-
-    return {
-        "path_generation": build_distribution(path_times),
-        "final_generation": build_distribution(final_times),
-        "end_to_end": build_distribution(total_times),
-    }
-
-
 def build_distribution(values: List[float]) -> Dict[str, float]:
     if not values:
         return {"mean": 0.0, "median": 0.0, "p90": 0.0, "p95": 0.0, "max": 0.0, "min": 0.0}
@@ -110,6 +149,18 @@ def build_distribution(values: List[float]) -> Dict[str, float]:
     }
 
 
+def summarize_times(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+    path_times = [sample["time"][2] for sample in samples]
+    final_times = [sample["time"][3] for sample in samples]
+    total_times = [sample["time"][2] + sample["time"][3] for sample in samples]
+
+    return {
+        "path_generation": build_distribution(path_times),
+        "final_generation": build_distribution(final_times),
+        "end_to_end": build_distribution(total_times),
+    }
+
+
 def analyze_answer_quality(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
     em_scores: List[float] = []
     f1_scores: List[float] = []
@@ -119,7 +170,7 @@ def analyze_answer_quality(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
     no_info_count = 0
 
     for sample in samples:
-        prediction = sample.get("answer", "")
+        prediction = extract_model_answer(sample.get("answer", ""))
         ground_truth = sample.get("ground_truth", "")
 
         em_scores.append(exact_match_score(prediction, ground_truth))
@@ -131,6 +182,7 @@ def analyze_answer_quality(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         norm_gt = normalize_squad(ground_truth)
         norm_pred = normalize_squad(prediction)
+
         if norm_gt in {"yes", "no"}:
             yesno_total += 1
             if norm_gt == norm_pred:
@@ -176,11 +228,7 @@ def compare_recall(samples: List[Dict[str, Any]]) -> Dict[str, int]:
         else:
             tie += 1
 
-    return {
-        "corag_better": corag_better,
-        "naive_better": naive_better,
-        "tie": tie,
-    }
+    return {"corag_better": corag_better, "naive_better": naive_better, "tie": tie}
 
 
 def analyze_reasoning(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -193,55 +241,156 @@ def analyze_reasoning(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def analyze_retrieval_failures(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _question_category(question: str) -> str:
+    lowered = question.lower()
+    if any(token in lowered for token in ["same nationality", "same country", "same place", "share the same nationality", "share the same country"]):
+        return "comparison"
+    if any(token in lowered for token in ["father-in-law", "mother-in-law", "maternal ", "paternal ", "stepmother", "stepfather"]):
+        return "complex_kinship"
+    if any(token in lowered for token in ["director of film", "composer of film", "performer of song", "composer of song", "director of the film", "composer of the film"]):
+        return "role_bridge"
+    return "other"
+
+
+def _is_no_info(text: str) -> bool:
+    return "no relevant information found" in extract_model_answer(text).lower()
+
+
+def _first_step_failed(sample: Dict[str, Any]) -> bool:
+    steps = sample.get("reasoning_steps", [])
+    return bool(steps) and _is_no_info(steps[0].get("subanswer", ""))
+
+
+def _rewrites_after_first_failure(sample: Dict[str, Any]) -> bool:
+    steps = sample.get("reasoning_steps", [])
+    if len(steps) < 2 or not _first_step_failed(sample):
+        return False
+    first = normalize_squad(steps[0].get("subquery", ""))
+    for step in steps[1:]:
+        current = normalize_squad(step.get("subquery", ""))
+        if current and current != first:
+            return True
+    return False
+
+
+def _rewrite_salvaged(sample: Dict[str, Any]) -> bool:
+    if not _rewrites_after_first_failure(sample):
+        return False
+    for step in sample.get("reasoning_steps", [])[1:]:
+        if not _is_no_info(step.get("subanswer", "")):
+            return True
+    return False
+
+
+def _relation_drift(sample: Dict[str, Any]) -> bool:
+    question = sample.get("question", "").lower()
+    step_queries = " ".join(step.get("subquery", "").lower() for step in sample.get("reasoning_steps", []))
+    if "father-in-law" in question and "spouse" not in step_queries:
+        return True
+    if "maternal grandmother" in question and "mother" not in step_queries:
+        return True
+    if "paternal grandmother" in question and "father" not in step_queries:
+        return True
+    if "stepmother" in question and "father" not in step_queries:
+        return True
+    return False
+
+
+def _comparison_one_side_missing(sample: Dict[str, Any]) -> bool:
+    if _question_category(sample.get("question", "")) != "comparison":
+        return False
+    steps = sample.get("reasoning_steps", [])
+    if not steps:
+        return False
+    informative_steps = [step for step in steps if not _is_no_info(step.get("subanswer", ""))]
+    return len(informative_steps) == 1
+
+
+def _count_format_issues(sample: Dict[str, Any], side: str) -> int:
+    debug = sample.get("retrieval_debug", {})
+    if side == "corag":
+        return sum(int(step.get("format_issue_count", 0)) for step in debug.get("corag_steps", []) if isinstance(step, dict))
+    side_info = debug.get("naive", {})
+    if isinstance(side_info, dict):
+        return int(side_info.get("format_issue_count", 0))
+    return 0
+
+
+def analyze_retrieval_failures(samples: List[Dict[str, Any]], top_failure_count: int = 8) -> Dict[str, Any]:
     total = len(samples)
-    zero_corag = [sample for sample in samples if sample.get("corag_recall", {}).get("recall", 0.0) == 0.0]
-    no_info = [sample for sample in samples if "no relevant information found" in sample.get("answer", "").lower()]
-    yes_no_errors = [
+    zero_corag = [
         sample for sample in samples
-        if normalize_squad(sample.get("ground_truth", "")) in {"yes", "no"}
-        and normalize_squad(sample.get("answer", "")) != normalize_squad(sample.get("ground_truth", ""))
+        if sample.get("corag_recall") is not None and sample["corag_recall"].get("recall", 0.0) == 0.0
+    ]
+    no_info = [sample for sample in samples if _is_no_info(sample.get("answer", ""))]
+    yes_no_pool = [sample for sample in samples if normalize_squad(sample.get("ground_truth", "")) in {"yes", "no"}]
+    yes_no_errors = [
+        sample for sample in yes_no_pool
+        if normalize_squad(extract_model_answer(sample.get("answer", ""))) != normalize_squad(sample.get("ground_truth", ""))
     ]
 
-    relation_drift = 0
-    for sample in samples:
-        question = sample.get("question", "").lower()
-        steps = sample.get("reasoning_steps", [])
-        if not steps:
+    first_step_failed = [sample for sample in samples if _first_step_failed(sample)]
+    rewritten_after_failure = [sample for sample in samples if _rewrites_after_first_failure(sample)]
+    rewrite_salvaged = [sample for sample in samples if _rewrite_salvaged(sample)]
+    relation_drift = [sample for sample in samples if _relation_drift(sample)]
+    comparison_one_side_missing = [sample for sample in samples if _comparison_one_side_missing(sample)]
+    complex_kinship = [sample for sample in samples if _question_category(sample.get("question", "")) == "complex_kinship"]
+    complex_kinship_fail = [
+        sample for sample in complex_kinship
+        if sample.get("corag_recall", {}).get("recall", 0.0) == 0.0
+    ]
+    role_bridge = [sample for sample in samples if _question_category(sample.get("question", "")) == "role_bridge"]
+    role_bridge_fail = [
+        sample for sample in role_bridge
+        if sample.get("corag_recall", {}).get("recall", 0.0) == 0.0
+    ]
+
+    corag_format_issue_total = sum(_count_format_issues(sample, "corag") for sample in samples)
+    naive_format_issue_total = sum(_count_format_issues(sample, "naive") for sample in samples)
+
+    failure_examples = [
+        {
+            "question": sample.get("question", ""),
+            "first_subquery": (sample.get("reasoning_steps") or [{}])[0].get("subquery", ""),
+            "first_subanswer": (sample.get("reasoning_steps") or [{}])[0].get("subanswer", ""),
+            "corag_recall": sample.get("corag_recall", {}).get("recall", 0.0),
+            "final_answer": extract_model_answer(sample.get("answer", "")),
+        }
+        for sample in zero_corag[:top_failure_count]
+    ]
+
+    category_stats: Dict[str, Dict[str, float]] = {}
+    for category in ("comparison", "complex_kinship", "role_bridge", "other"):
+        bucket = [sample for sample in samples if _question_category(sample.get("question", "")) == category]
+        if not bucket:
             continue
-        step_queries = " ".join(step.get("subquery", "").lower() for step in steps)
-        if "father-in-law" in question and "spouse" not in step_queries:
-            relation_drift += 1
-        elif "maternal grandmother" in question and "mother" not in step_queries:
-            relation_drift += 1
-        elif "paternal grandmother" in question and "father" not in step_queries:
-            relation_drift += 1
-        elif "stepmother" in question and "father" not in step_queries:
-            relation_drift += 1
+        zero_bucket = [sample for sample in bucket if sample.get("corag_recall", {}).get("recall", 0.0) == 0.0]
+        category_stats[category] = {
+            "count": len(bucket),
+            "zero_recall_rate": len(zero_bucket) / len(bucket),
+            "avg_corag_recall": mean(sample.get("corag_recall", {}).get("recall", 0.0) for sample in bucket),
+        }
 
     return {
         "zero_corag_recall_rate": len(zero_corag) / total if total else 0.0,
         "no_info_rate": len(no_info) / total if total else 0.0,
-        "yes_no_error_rate": len(yes_no_errors) / len([s for s in samples if normalize_squad(s.get("ground_truth", "")) in {"yes", "no"}]) if any(normalize_squad(s.get("ground_truth", "")) in {"yes", "no"} for s in samples) else 0.0,
-        "relation_drift_count": relation_drift,
-        "examples": [
-            {
-                "question": sample.get("question", ""),
-                "prediction": sample.get("answer", ""),
-                "ground_truth": sample.get("ground_truth", ""),
-                "corag_recall": sample.get("corag_recall", {}).get("recall", 0.0),
-            }
-            for sample in zero_corag[:5]
-        ],
+        "yes_no_error_rate": len(yes_no_errors) / len(yes_no_pool) if yes_no_pool else 0.0,
+        "first_step_failure_rate": len(first_step_failed) / total if total else 0.0,
+        "rewrite_after_failure_rate": len(rewritten_after_failure) / len(first_step_failed) if first_step_failed else 0.0,
+        "rewrite_salvage_rate": len(rewrite_salvaged) / len(rewritten_after_failure) if rewritten_after_failure else 0.0,
+        "relation_drift_count": len(relation_drift),
+        "comparison_one_side_missing_rate": len(comparison_one_side_missing) / len([sample for sample in samples if _question_category(sample.get("question", "")) == "comparison"]) if any(_question_category(sample.get("question", "")) == "comparison" for sample in samples) else 0.0,
+        "complex_kinship_failure_rate": len(complex_kinship_fail) / len(complex_kinship) if complex_kinship else 0.0,
+        "role_bridge_failure_rate": len(role_bridge_fail) / len(role_bridge) if role_bridge else 0.0,
+        "corag_format_issue_total": corag_format_issue_total,
+        "naive_format_issue_total": naive_format_issue_total,
+        "category_stats": category_stats,
+        "failure_examples": failure_examples,
     }
 
 
 def get_slowest_samples(samples: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
-    ranked = sorted(
-        samples,
-        key=lambda sample: sample["time"][2] + sample["time"][3],
-        reverse=True,
-    )
+    ranked = sorted(samples, key=lambda sample: sample["time"][2] + sample["time"][3], reverse=True)
     return [
         {
             "question": sample.get("question", ""),
@@ -268,20 +417,21 @@ def load_eval_file(file_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]
     return summary, samples
 
 
-def build_report(summary: Dict[str, Any], samples: List[Dict[str, Any]], top_k: int) -> Dict[str, Any]:
+def build_report(summary: Dict[str, Any], samples: List[Dict[str, Any]], top_k: int, failure_top_k: int) -> Dict[str, Any]:
     report = {
         "input_summary": summary,
         "sample_count": len(samples),
         "timing": summarize_times(samples),
         "answer_quality": analyze_answer_quality(samples),
         "reasoning": analyze_reasoning(samples),
-        "retrieval_diagnostics": analyze_retrieval_failures(samples),
+        "retrieval_diagnostics": analyze_retrieval_failures(samples, top_failure_count=failure_top_k),
         "slowest_samples": get_slowest_samples(samples, top_k=top_k),
         "notes": [
             "The original eval summary stores path generation time in the third slot of time[].",
             "In custom_batch_eval.py, avg_reranker_time is currently used to summarize path generation time rather than an actual reranker stage.",
             "avg_llm_call_time in the original summary corresponds to final answer generation time, not total LLM time across all sub-steps.",
-            "Low recall often comes from subquery relation drift or overly broad entity resolution before retrieval, not only from the retriever itself.",
+            "Predictions are normalized to strip SubQuery/SubAnswer/Final Answer wrappers before answer-quality scoring.",
+            "Retrieval diagnostics now separate first-hop failure, rewrite salvage, relation drift, category-specific failure rates, and result-format anomalies.",
         ],
     }
 
@@ -325,7 +475,25 @@ def print_report(report: Dict[str, Any]) -> None:
     print(f"zero_corag_recall_rate={diagnostics['zero_corag_recall_rate']:.4f}")
     print(f"no_info_rate={diagnostics['no_info_rate']:.4f}")
     print(f"yes_no_error_rate={diagnostics['yes_no_error_rate']:.4f}")
+    print(f"first_step_failure_rate={diagnostics['first_step_failure_rate']:.4f}")
+    print(f"rewrite_after_failure_rate={diagnostics['rewrite_after_failure_rate']:.4f}")
+    print(f"rewrite_salvage_rate={diagnostics['rewrite_salvage_rate']:.4f}")
     print(f"relation_drift_count={diagnostics['relation_drift_count']}")
+    print(f"comparison_one_side_missing_rate={diagnostics['comparison_one_side_missing_rate']:.4f}")
+    print(f"complex_kinship_failure_rate={diagnostics['complex_kinship_failure_rate']:.4f}")
+    print(f"role_bridge_failure_rate={diagnostics['role_bridge_failure_rate']:.4f}")
+    print(f"corag_format_issue_total={diagnostics['corag_format_issue_total']}")
+    print(f"naive_format_issue_total={diagnostics['naive_format_issue_total']}")
+
+    category_stats = diagnostics.get("category_stats", {})
+    if category_stats:
+        print("\n[Category Breakdown]")
+        for category, stats in category_stats.items():
+            print(
+                f"{category}: count={int(stats['count'])}, "
+                f"zero_recall_rate={stats['zero_recall_rate']:.4f}, "
+                f"avg_corag_recall={stats['avg_corag_recall']:.4f}"
+            )
 
     if "corag_recall" in report:
         recall = report["corag_recall"]
@@ -340,6 +508,15 @@ def print_report(report: Dict[str, Any]) -> None:
         print(
             f"Recall comparison: corag_better={comparison.get('corag_better', 0)}, "
             f"naive_better={comparison.get('naive_better', 0)}, tie={comparison.get('tie', 0)}"
+        )
+
+    print("\n[Top Failure Examples]")
+    for index, sample in enumerate(diagnostics.get("failure_examples", []), start=1):
+        print(
+            f"{index}. recall={sample['corag_recall']:.4f}, "
+            f"question={sample['question']}, "
+            f"first_subquery={sample['first_subquery']}, "
+            f"first_subanswer={sample['first_subanswer']}"
         )
 
     print("\n[Slowest Samples]")
@@ -364,6 +541,7 @@ def main() -> None:
     )
     parser.add_argument("--save_report", type=str, default="", help="Optional path to save analysis report JSON")
     parser.add_argument("--top_k", type=int, default=10, help="Number of slowest samples to include")
+    parser.add_argument("--failure_top_k", type=int, default=8, help="Number of failure examples to include")
     args = parser.parse_args()
 
     input_path = Path(args.input_file) if args.input_file else DEFAULT_EVAL_FILE
@@ -374,7 +552,7 @@ def main() -> None:
         raise FileNotFoundError(f"Eval output JSON not found: {resolved_input_path}")
 
     summary, samples = load_eval_file(input_path)
-    report = build_report(summary, samples, top_k=args.top_k)
+    report = build_report(summary, samples, top_k=args.top_k, failure_top_k=args.failure_top_k)
     print_report(report)
 
     if args.save_report:

@@ -22,7 +22,7 @@ from config import Arguments
 from data_utils import load_corpus, format_documents_for_final_answer
 from vllm_client import VllmClient, get_vllm_model_id
 from agent import CoRagAgent, RagPath
-from search.search_utils import search_by_http, search_by_graph_api
+from search.search_utils import extract_retrieved_documents, search_by_http, search_by_graph_api, search_with_variants
 from utils import AtomicCounter
 import re
 from logger_config import logger
@@ -201,13 +201,75 @@ def run_custom_eval(args: Arguments):
         graph_api_url=args.graph_api_url, 
         tokenizer=tokenizer,
         final_vllm_client=final_vllm_client,
-        sub_answer_vllm_client=sub_answer_vllm_client
+        sub_answer_vllm_client=sub_answer_vllm_client,
+        retrieval_max_variants=args.retrieval_max_variants,
+        retrieval_per_query_limit=args.retrieval_per_query_limit,
+        retrieval_service_top_k=args.retrieval_service_top_k,
+        enable_deterministic_planner=args.enable_deterministic_planner,
+        enable_generic_deterministic_rules=args.enable_generic_deterministic_rules,
+        enable_dataset_specific_rules=args.enable_dataset_specific_rules,
+        dataset_rule_profile=args.dataset_rule_profile,
     )
     # Use the same lock as the agent to ensure thread safety for tokenizer access
     tokenizer_lock: threading.Lock = corag_agent.lock
 
+    # Pre-flight: verify the retrieval service is reachable before starting the eval.
+    # A failure here saves hours of timeout-wasted wall time.
+    logger.info("Pre-flight: checking retrieval service connectivity...")
+    _test_query = "test connectivity"
+    _t0 = time.time()
+    if args.graph_api_url:
+        _test_results = search_by_graph_api(query=_test_query, url=args.graph_api_url, top_k=args.retrieval_service_top_k)
+    else:
+        _test_results = search_by_http(query=_test_query, top_k=args.retrieval_service_top_k)
+    _elapsed = time.time() - _t0
+    # For graph/PPR retrieval a single cold-start call legitimately takes 30-120 s.
+    # Flag as a problem only when it returns no results (hard failure), not just slowness.
+    _slow_threshold = 60.0 if args.graph_api_url else 4.0
+    if not _test_results:
+        logger.warning(
+            f"RETRIEVAL SERVICE ISSUE DETECTED: test query took {_elapsed:.1f}s and returned "
+            f"{len(_test_results)} result(s).  All searches during this eval will likely return "
+            "empty, causing recall=0 and answers driven entirely by LLM parametric memory.  "
+            "Please ensure the retrieval service is running and accessible before re-running."
+        )
+    elif _elapsed > _slow_threshold:
+        logger.warning(
+            f"Retrieval service responded but is SLOW ({_elapsed:.1f}s, {len(_test_results)} result(s)). "
+            f"Under concurrent load the gc_service may not keep up. Consider using --num_threads 1 or 2."
+        )
+    else:
+        logger.info(f"Retrieval service OK ({_elapsed:.2f}s, {len(_test_results)} result(s) for test query).")
+    # Log the raw format of the first result so we can verify the field names
+    # that the retrieval service actually returns (for format-mismatch diagnosis).
+    if _test_results:
+        first = _test_results[0]
+        logger.info(
+            f"[FORMAT PROBE] type={type(first).__name__}, "
+            f"value_preview={repr(first)[:300]}"
+        )
+        if isinstance(first, dict):
+            logger.info(f"[FORMAT PROBE] dict keys: {list(first.keys())}")
+
     if args.max_path_length < 1:
         args.decode_strategy = 'greedy'
+
+    # Safety check: graph PPR retrieval is CPU-bound and serialised by the GIL on the
+    # server side.  Running many client threads hammers a single gc_service worker and
+    # causes cascading read timeouts (each queued request waits ~PPR_time × queue_depth).
+    # With PPR taking 30-120 s per call:
+    #   - 1 thread:  queue_depth=1  → wait ~30-120 s  (safe with 240 s timeout)
+    #   - 2 threads: queue_depth=2  → wait ~60-240 s  (borderline with 240 s timeout)
+    #   - 3+ threads: queue_depth=3 → wait ~90-360 s  (likely to exceed 240 s timeout)
+    # Strong recommendation: --num_threads 1
+    if args.graph_api_url and args.num_threads > 2:
+        logger.warning(
+            f"num_threads={args.num_threads} is likely too high for graph/PPR retrieval. "
+            "The gc_service PPR operation is CPU-bound and effectively single-threaded "
+            "due to the Python GIL. Each extra concurrent thread adds ~30-120 s of "
+            "queue wait, quickly exceeding the read timeout even with retry. "
+            "Strongly recommended: --num_threads 1  (safe) or --num_threads 2 (borderline)"
+        )
 
     # Load custom dataset
     logger.info(f"Loading custom dataset from {args.eval_file}...")
@@ -263,7 +325,6 @@ def run_custom_eval(args: Arguments):
                 n = args.best_n,
                 max_tokens=64
             )
-        
         path_gen_time = time.time() - start_time
         
         # 2. Document Formatting
@@ -289,61 +350,58 @@ def run_custom_eval(args: Arguments):
         # 4. Recall Evaluation
         corag_recall_info = {}
         naive_recall_info = {}
+        retrieval_debug = {
+            "corag_steps": getattr(path, "past_retrieval_stats", []) or [],
+        }
         
         if args.calc_recall:
             # A. Get Golden Facts
             golden_facts = get_golden_facts(item)
             
             # B. CoRAG Recall
-            # unique_documents contains the set of documents retrieved by CoRAG
-            c_hits, c_total = check_hit(unique_documents, golden_facts)
+            # Use the same document budget that reaches final-answer generation.
+            c_hits, c_total = check_hit(documents, golden_facts)
             corag_recall_info = {
                 "hits": c_hits,
                 "total": c_total,
-                "recall": c_hits / c_total if c_total > 0 else 0.0
+                "recall": c_hits / c_total if c_total > 0 else 0.0,
+                "retrieved_docs": documents,
             }
             
             # C. Naive Retrieval Recall
+            # Uses search_with_variants (same variant expansion as CoRAG) for a fair comparison.
             if args.enable_naive_retrieval:
-                naive_docs = []
-                naive_query = question
-                
-                # Check if graph_api_url is set (CoRagAgent logic)
-                if args.graph_api_url:
-                    # Note: We don't have direct access to graph_api_url here unless we check args
-                    # Assuming args.graph_api_url is populated
-                    retriever_results = search_by_graph_api(query=naive_query, url=args.graph_api_url)
-                    
-                    # Process results similar to CoRagAgent._get_subanswer_and_doc_ids
-                    for res in retriever_results:
-                         if isinstance(res, str):
-                            naive_docs.append(res)
-                         elif isinstance(res, dict):
-                            content = res.get('contents') or res.get('content') or res.get('text') or str(res)
-                            naive_docs.append(content)
-                else:
-                     # Fallback to http search
-                     retriever_results = search_by_http(query=naive_query)
-                     # Assuming http search returns list of dict with 'doc_id'
-                     # and we need corpus to get text.
-                     if corpus:
-                         doc_ids = [res['doc_id'] for res in retriever_results]
-                         # Using data_utils.format_input_context logic
-                         from data_utils import format_input_context
-                         naive_docs = [format_input_context(corpus[int(doc_id)]) for doc_id in doc_ids]
+                naive_raw = search_with_variants(
+                    query=question,
+                    graph_api_url=args.graph_api_url if args.graph_api_url else None,
+                    max_variants=args.retrieval_max_variants,
+                    per_query_limit=args.retrieval_per_query_limit,
+                    service_top_k=args.retrieval_service_top_k,
+                )
+                _, naive_docs, naive_format_issue_count = extract_retrieved_documents(
+                    naive_raw,
+                    reverse_order=False,
+                    limit=args.num_contexts,
+                    corpus=corpus,
+                )
 
-                # Limit by num_contexts
-                naive_docs = naive_docs[:args.num_contexts]
-                
                 n_hits, n_total = check_hit(naive_docs, golden_facts)
                 naive_recall_info = {
                     "hits": n_hits,
                     "total": n_total,
                     "recall": n_hits / n_total if n_total > 0 else 0.0,
-                    "retrieved_docs": naive_docs # Optional: save retrieved docs for debugging
+                    "retrieved_docs": naive_docs
+                }
+                retrieval_debug["naive"] = {
+                    "raw_result_count": len(naive_raw),
+                    "usable_result_count": len(naive_docs),
+                    "format_issue_count": naive_format_issue_count,
                 }
 
         # 3. Final Answer Generation
+        # Time this stage separately so the recall-evaluation overhead does not
+        # contaminate the reported final_generation latency.
+        final_gen_start = time.time()
         prediction: str = corag_agent.generate_final_answer(
             corag_sample=path,
             task_desc=task_desc,
@@ -351,10 +409,7 @@ def run_custom_eval(args: Arguments):
             max_message_length=args.max_len,
             temperature=0., max_tokens=128
         )
-        
-        end_time = time.time()
-        total_time = end_time - start_time
-        final_gen_time = total_time - path_gen_time
+        final_gen_time = time.time() - final_gen_start
 
         # Logging
         processed_cnt.increment()
@@ -372,7 +427,8 @@ def run_custom_eval(args: Arguments):
             "reasoning_steps": [],
             "time": time_breakdown,
             "corag_recall": corag_recall_info if args.calc_recall else None,
-            "naive_recall": naive_recall_info if args.calc_recall and args.enable_naive_retrieval else None
+            "naive_recall": naive_recall_info if args.calc_recall and args.enable_naive_retrieval else None,
+            "retrieval_debug": retrieval_debug,
         }
 
         # Add reasoning steps
