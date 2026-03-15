@@ -538,6 +538,12 @@ def run_custom_eval(args: Arguments):
         "avg_ppr_time": total_ppr / num_samples if num_samples > 0 else 0,
         "avg_reranker_time": total_reranker / num_samples if num_samples > 0 else 0,
         "avg_llm_call_time": total_llm_call / num_samples if num_samples > 0 else 0,
+        "avg_path_generation_time": total_reranker / num_samples if num_samples > 0 else 0,
+        "avg_final_generation_time": total_llm_call / num_samples if num_samples > 0 else 0,
+        "timing_notes": {
+            "avg_reranker_time": "Legacy alias for path generation time kept for backward compatibility.",
+            "avg_llm_call_time": "Legacy alias for final answer generation time kept for backward compatibility.",
+        },
     }
     
     if args.calc_recall:

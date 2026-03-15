@@ -3,6 +3,7 @@ import json
 import math
 import re
 import string
+import sys
 from pathlib import Path
 from statistics import mean, median
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,6 +27,19 @@ def resolve_default_eval_file() -> Path:
 
 
 DEFAULT_EVAL_FILE = resolve_default_eval_file()
+
+
+def _safe_stdout_text(text: str) -> str:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding, errors="strict")
+        return text
+    except UnicodeEncodeError:
+        return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+def _safe_print(text: str = "") -> None:
+    print(_safe_stdout_text(text))
 
 
 def normalize_squad(text: str) -> str:
@@ -438,6 +452,7 @@ def build_report(summary: Dict[str, Any], samples: List[Dict[str, Any]], top_k: 
             "The original eval summary stores path generation time in the third slot of time[].",
             "In custom_batch_eval.py, avg_reranker_time is currently used to summarize path generation time rather than an actual reranker stage.",
             "avg_llm_call_time in the original summary corresponds to final answer generation time, not total LLM time across all sub-steps.",
+            "Newer v2 eval outputs may also include avg_path_generation_time and avg_final_generation_time aliases while preserving legacy timing keys for compatibility.",
             "Predictions are normalized to strip SubQuery/SubAnswer/Final Answer wrappers before answer-quality scoring.",
             "Retrieval diagnostics now separate first-hop failure, rewrite salvage, relation drift, category-specific failure rates, and result-format anomalies.",
             "The analyzer supports both legacy list output ([Summary, sample1, ...]) and v2 object output ({summary, results}).",
@@ -454,51 +469,51 @@ def build_report(summary: Dict[str, Any], samples: List[Dict[str, Any]], top_k: 
 
 
 def print_report(report: Dict[str, Any]) -> None:
-    print("=== Eval Analysis ===")
-    print(f"Samples: {report['sample_count']}")
+    _safe_print("=== Eval Analysis ===")
+    _safe_print(f"Samples: {report['sample_count']}")
 
     answer_quality = report["answer_quality"]
-    print("\n[Answer Quality]")
-    print(f"EM: {answer_quality['exact_match']:.4f}")
-    print(f"Token F1: {answer_quality['token_f1']:.4f}")
-    print(f"Contains Match: {answer_quality['contains_match']:.4f}")
-    print(f"Yes/No Accuracy: {answer_quality['yes_no_accuracy']:.4f} (n={answer_quality['yes_no_total']})")
-    print(f"No Relevant Information Rate: {answer_quality['no_relevant_info_rate']:.4f}")
+    _safe_print("\n[Answer Quality]")
+    _safe_print(f"EM: {answer_quality['exact_match']:.4f}")
+    _safe_print(f"Token F1: {answer_quality['token_f1']:.4f}")
+    _safe_print(f"Contains Match: {answer_quality['contains_match']:.4f}")
+    _safe_print(f"Yes/No Accuracy: {answer_quality['yes_no_accuracy']:.4f} (n={answer_quality['yes_no_total']})")
+    _safe_print(f"No Relevant Information Rate: {answer_quality['no_relevant_info_rate']:.4f}")
 
-    print("\n[Timing]")
+    _safe_print("\n[Timing]")
     for key, stats in report["timing"].items():
-        print(
+        _safe_print(
             f"{key}: mean={stats['mean']:.2f}s, median={stats['median']:.2f}s, "
             f"p90={stats['p90']:.2f}s, p95={stats['p95']:.2f}s, max={stats['max']:.2f}s"
         )
 
-    print("\n[Reasoning]")
+    _safe_print("\n[Reasoning]")
     reasoning = report["reasoning"]
-    print(
+    _safe_print(
         f"avg_steps={reasoning['avg_steps']:.2f}, median_steps={reasoning['median_steps']:.2f}, "
         f"min_steps={reasoning['min_steps']}, max_steps={reasoning['max_steps']}"
     )
 
     diagnostics = report["retrieval_diagnostics"]
-    print("\n[Retrieval Diagnostics]")
-    print(f"zero_corag_recall_rate={diagnostics['zero_corag_recall_rate']:.4f}")
-    print(f"no_info_rate={diagnostics['no_info_rate']:.4f}")
-    print(f"yes_no_error_rate={diagnostics['yes_no_error_rate']:.4f}")
-    print(f"first_step_failure_rate={diagnostics['first_step_failure_rate']:.4f}")
-    print(f"rewrite_after_failure_rate={diagnostics['rewrite_after_failure_rate']:.4f}")
-    print(f"rewrite_salvage_rate={diagnostics['rewrite_salvage_rate']:.4f}")
-    print(f"relation_drift_count={diagnostics['relation_drift_count']}")
-    print(f"comparison_one_side_missing_rate={diagnostics['comparison_one_side_missing_rate']:.4f}")
-    print(f"complex_kinship_failure_rate={diagnostics['complex_kinship_failure_rate']:.4f}")
-    print(f"role_bridge_failure_rate={diagnostics['role_bridge_failure_rate']:.4f}")
-    print(f"corag_format_issue_total={diagnostics['corag_format_issue_total']}")
-    print(f"naive_format_issue_total={diagnostics['naive_format_issue_total']}")
+    _safe_print("\n[Retrieval Diagnostics]")
+    _safe_print(f"zero_corag_recall_rate={diagnostics['zero_corag_recall_rate']:.4f}")
+    _safe_print(f"no_info_rate={diagnostics['no_info_rate']:.4f}")
+    _safe_print(f"yes_no_error_rate={diagnostics['yes_no_error_rate']:.4f}")
+    _safe_print(f"first_step_failure_rate={diagnostics['first_step_failure_rate']:.4f}")
+    _safe_print(f"rewrite_after_failure_rate={diagnostics['rewrite_after_failure_rate']:.4f}")
+    _safe_print(f"rewrite_salvage_rate={diagnostics['rewrite_salvage_rate']:.4f}")
+    _safe_print(f"relation_drift_count={diagnostics['relation_drift_count']}")
+    _safe_print(f"comparison_one_side_missing_rate={diagnostics['comparison_one_side_missing_rate']:.4f}")
+    _safe_print(f"complex_kinship_failure_rate={diagnostics['complex_kinship_failure_rate']:.4f}")
+    _safe_print(f"role_bridge_failure_rate={diagnostics['role_bridge_failure_rate']:.4f}")
+    _safe_print(f"corag_format_issue_total={diagnostics['corag_format_issue_total']}")
+    _safe_print(f"naive_format_issue_total={diagnostics['naive_format_issue_total']}")
 
     category_stats = diagnostics.get("category_stats", {})
     if category_stats:
-        print("\n[Category Breakdown]")
+        _safe_print("\n[Category Breakdown]")
         for category, stats in category_stats.items():
-            print(
+            _safe_print(
                 f"{category}: count={int(stats['count'])}, "
                 f"zero_recall_rate={stats['zero_recall_rate']:.4f}, "
                 f"avg_corag_recall={stats['avg_corag_recall']:.4f}"
@@ -506,41 +521,47 @@ def print_report(report: Dict[str, Any]) -> None:
 
     if "corag_recall" in report:
         recall = report["corag_recall"]
-        print("\n[CoRAG Recall]")
-        print(f"micro={recall['micro_recall']:.4f}, macro={recall['macro_recall']:.4f}, hits={recall['total_hits']}, gold={recall['total_gold']}")
+        _safe_print("\n[CoRAG Recall]")
+        _safe_print(f"micro={recall['micro_recall']:.4f}, macro={recall['macro_recall']:.4f}, hits={recall['total_hits']}, gold={recall['total_gold']}")
 
     if "naive_recall" in report:
         recall = report["naive_recall"]
         comparison = report.get("recall_comparison", {})
-        print("\n[Naive Recall]")
-        print(f"micro={recall['micro_recall']:.4f}, macro={recall['macro_recall']:.4f}, hits={recall['total_hits']}, gold={recall['total_gold']}")
-        print(
+        _safe_print("\n[Naive Recall]")
+        _safe_print(f"micro={recall['micro_recall']:.4f}, macro={recall['macro_recall']:.4f}, hits={recall['total_hits']}, gold={recall['total_gold']}")
+        _safe_print(
             f"Recall comparison: corag_better={comparison.get('corag_better', 0)}, "
             f"naive_better={comparison.get('naive_better', 0)}, tie={comparison.get('tie', 0)}"
         )
 
-    print("\n[Top Failure Examples]")
+    _safe_print("\n[Top Failure Examples]")
     for index, sample in enumerate(diagnostics.get("failure_examples", []), start=1):
-        print(
+        _safe_print(
             f"{index}. recall={sample['corag_recall']:.4f}, "
             f"question={sample['question']}, "
             f"first_subquery={sample['first_subquery']}, "
             f"first_subanswer={sample['first_subanswer']}"
         )
 
-    print("\n[Slowest Samples]")
+    _safe_print("\n[Slowest Samples]")
     for index, sample in enumerate(report["slowest_samples"], start=1):
-        print(
+        _safe_print(
             f"{index}. total={sample['total_time']:.2f}s, path={sample['path_generation_time']:.2f}s, "
             f"final={sample['final_generation_time']:.2f}s, steps={sample['reasoning_steps']}, question={sample['question']}"
         )
 
-    print("\n[Notes]")
+    _safe_print("\n[Notes]")
     for note in report["notes"]:
-        print(f"- {note}")
+        _safe_print(f"- {note}")
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+
     parser = argparse.ArgumentParser(description="Analyze custom_batch_eval output JSON.")
     parser.add_argument(
         "input_file",
@@ -555,7 +576,7 @@ def main() -> None:
 
     input_path = Path(args.input_file) if args.input_file else DEFAULT_EVAL_FILE
     resolved_input_path = input_path.resolve()
-    print(f"Input eval file: {resolved_input_path}")
+    _safe_print(f"Input eval file: {resolved_input_path}")
 
     if not input_path.exists():
         raise FileNotFoundError(f"Eval output JSON not found: {resolved_input_path}")

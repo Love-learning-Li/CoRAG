@@ -124,39 +124,55 @@ def _extract_comparison_entities(query: str) -> Optional[Tuple[str, str, str]]:
     attr = _comparison_attribute_from_query(query)
     if not attr:
         return None
-
-    comparison_patterns = [
-        r'^(?:Are both|Were both)\s+(?:movies|films|songs)?\,?\s*(?P<left>.+?)\s+and\s+(?P<right>.+?)\,?\s+(?:from|of|born in)\s+the same .*\?$',
-        r'^(?:Did|Do) the (?:movies|films)\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\,?\s+(?:originate|originated)\s+from\s+the same .*\?$',
-        r'^(?:Did|Do) both (?:movies|films)\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\,?\s+(?:originate|originated)\s+from\s+the same .*\?$',
-        r'^(?:Are|Do|Did|Were)\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s+of the same .*\?$',
-        r'^(?:Do|Are|Did|Were) both\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s+.*same .*\?$',
-    ]
-    for pattern in comparison_patterns:
-        match = re.match(pattern, query, flags=re.IGNORECASE)
-        if match:
-            left = match.group('left').strip().strip(' ,')
-            right = match.group('right').strip().strip(' ,')
-            left = re.sub(r'^(?:movies|films|songs)\s*,?\s*', '', left, flags=re.IGNORECASE)
-            right = re.sub(r'\s+(?:movies|films|songs)\b.*$', '', right, flags=re.IGNORECASE)
-            right = re.sub(r'\s+(?:have|that|who)\b.*$', '', right, flags=re.IGNORECASE)
-            return left, right, attr
+    cleaned_query = query.strip()
 
     role_match = re.match(
-        r'^(?:Are|Do|Did|Were)\s+(?P<left_prefix>director|composer|performer)\s+of\s+(?:film|movie|song)\s+(?P<left>.+?)\s+and\s+(?P<right_prefix>director|composer|performer)\s+of\s+(?:film|movie|song)\s+(?P<right>.+?)\s+.*$',
-        query,
+        r'^(?:Are|Do|Did|Were)\s+'
+        r'(?P<left_prefix>director|composer|performer)\s+of\s+(?:the\s+)?(?P<left_kind>film|movie|song|track|single)\s+(?P<left>.+?)\s+and\s+'
+        r'(?P<right_prefix>director|composer|performer)\s+of\s+(?:the\s+)?(?P<right_kind>film|movie|song|track|single)\s+(?P<right>.+?)\s+'
+        r'(?:from|of|born in|share|sharing|have|has|originat(?:e|ed))\b.*\?$',
+        cleaned_query,
         flags=re.IGNORECASE,
     )
     if role_match and role_match.group('left_prefix').lower() == role_match.group('right_prefix').lower():
-        return role_match.group('left').strip().strip(' ,?'), role_match.group('right').strip().strip(' ,?'), attr
+        left = role_match.group('left').strip().strip(' ,?')
+        right = role_match.group('right').strip().strip(' ,?')
+        return left, right, attr
 
     role_tail_match = re.match(
-        r'^(?:Do|Are|Did|Were)\s+both\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s+(?:films|movies|songs)\s+have\s+the\s+(?P<role>directors?|composers?|performers?)\s+.*$',
-        query,
+        r'^(?:Do|Are|Did|Were)\s+both\s+'
+        r'(?P<left>.+?)\s+and\s+(?P<right>.+?)\s+'
+        r'(?:films|movies|songs|tracks|singles)\s+have\s+the\s+'
+        r'(?P<role>directors?|composers?|performers?)\b.*\?$',
+        cleaned_query,
         flags=re.IGNORECASE,
     )
     if role_tail_match:
-        return role_tail_match.group('left').strip().strip(' ,'), role_tail_match.group('right').strip().strip(' ,'), attr
+        left = role_tail_match.group('left').strip().strip(' ,')
+        right = role_tail_match.group('right').strip().strip(' ,')
+        return left, right, attr
+
+    plain_patterns = [
+        r'^(?:Are both|Were both)\s+(?:(?:the|both)\s+)?(?:movies|films|songs|tracks|singles)?\,?\s*(?P<body>.+?)\s+(?:from|of|born in)\s+the same .*\?$',
+        r'^(?:Did|Do)\s+(?:the\s+)?(?:movies|films|songs|tracks|singles)?\s*(?P<body>.+?)\s+(?:originate|originated|come)\s+from\s+the same .*\?$',
+        r'^(?:Did|Do)\s+both\s+(?P<body>.+?)\s+(?:originate|originated|come)\s+from\s+the same .*\?$',
+        r'^(?:Are|Do|Did|Were)\s+(?P<body>.+?)\s+of the same .*\?$',
+        r'^(?:Do|Are|Did|Were)\s+both\s+(?P<body>.+?)\s+.*same .*\?$',
+    ]
+    for pattern in plain_patterns:
+        match = re.match(pattern, cleaned_query, flags=re.IGNORECASE)
+        if not match:
+            continue
+        body = match.group('body').strip().strip(' ,')
+        split = re.split(r'\s+and\s+', body, maxsplit=1, flags=re.IGNORECASE)
+        if len(split) != 2:
+            continue
+        left = re.sub(r'^(?:movies|films|songs|tracks|singles)\s*,?\s*', '', split[0], flags=re.IGNORECASE).strip(' ,')
+        right = re.sub(r'^(?:movies|films|songs|tracks|singles)\s*,?\s*', '', split[1], flags=re.IGNORECASE).strip(' ,')
+        right = re.sub(r'\s+(?:movies|films|songs|tracks|singles)\b$', '', right, flags=re.IGNORECASE).strip(' ,')
+        right = re.sub(r'\s+(?:have|that|who)\b.*$', '', right, flags=re.IGNORECASE).strip(' ,')
+        if left and right:
+            return left, right, attr
 
     return None
 
@@ -185,13 +201,55 @@ def _comparison_attribute_from_query(query: str) -> Optional[str]:
     return None
 
 
-def _extract_role_target(query: str) -> Optional[Tuple[str, str]]:
+def _comparison_role_media_type(query: str, role: str) -> Optional[str]:
+    lowered = query.lower()
+    role_token = role.lower()
+    role_context_pattern = re.compile(
+        rf'{role_token}\s+of\s+(?:the\s+)?(?P<media_type>film|movie|song|track|single|album|show|play|series)\b',
+        flags=re.IGNORECASE,
+    )
+    match = role_context_pattern.search(query)
+    if match:
+        return _normalize_media_type(match.group('media_type'), role_token)
+    if role_token == 'performer':
+        return 'song'
+    if role_token == 'director':
+        return 'film'
+    if role_token == 'composer':
+        if any(token in lowered for token in [' song ', ' songs', ' track ', ' single ']):
+            return 'song'
+        return 'film'
+    return None
+
+
+def _extract_media_type(query: str) -> Optional[str]:
+    lowered = query.lower()
+    for candidate in ('film', 'movie', 'song', 'track', 'single', 'album', 'show', 'play', 'series'):
+        if re.search(rf'\b{candidate}\b', lowered):
+            return candidate
+    return None
+
+
+def _normalize_media_type(media_type: Optional[str], role: Optional[str] = None) -> str:
+    normalized = (media_type or '').lower()
+    if normalized in {'movie', 'film'}:
+        return 'film'
+    if normalized in {'song', 'track', 'single'}:
+        return 'song'
+    if normalized in {'album', 'show', 'play', 'series'}:
+        return normalized
+    if role == 'performer':
+        return 'song'
+    return 'film'
+
+
+def _extract_role_target(query: str) -> Optional[Tuple[str, str, str]]:
     patterns = [
-        r'^(?:Who directed|Who is the director of) (?:(?:the|a) )?(?:film|movie|show|play|series) (?P<title>.+?)\?$',
-        r'^(?:Who directed) the (?P<year>(?:18|19|20)\d{2}) (?:(?:film|movie|show|play|series)) (?P<title>.+?)\?$',
-        r'^Who composed (?:the music for )?(?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
-        r'^Who performed (?:(?:the|a) )?(?:song|track|single) (?P<title>.+?)\?$',
-        r'^Who is the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
+        r'^(?:Who directed|Who is the director of) (?:(?:the|a) )?(?P<media_type>film|movie|show|play|series) (?P<title>.+?)\?$',
+        r'^(?:Who directed) the (?P<year>(?:18|19|20)\d{2}) (?P<media_type>film|movie|show|play|series) (?P<title>.+?)\?$',
+        r'^Who composed (?:the music for )?(?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
+        r'^Who performed (?:(?:the|a) )?(?P<media_type>song|track|single) (?P<title>.+?)\?$',
+        r'^Who is the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
     ]
     for pattern in patterns:
         match = re.match(pattern, query, flags=re.IGNORECASE)
@@ -199,39 +257,45 @@ def _extract_role_target(query: str) -> Optional[Tuple[str, str]]:
             continue
         role = match.groupdict().get('role')
         title = match.groupdict().get('title')
+        media_type = _normalize_media_type(match.groupdict().get('media_type'))
         lowered = query.lower()
         if role:
-            return role.lower(), title.strip()
+            return role.lower(), title.strip(), media_type
         if 'directed' in lowered:
-            return 'director', title.strip()
+            return 'director', title.strip(), media_type
         if 'composed' in lowered:
-            return 'composer', title.strip()
+            return 'composer', title.strip(), media_type
         if 'performed' in lowered:
-            return 'performer', title.strip()
+            return 'performer', title.strip(), media_type
     return None
 
 
-def _role_query(role: str, title: str) -> str:
+def _role_query(role: str, title: str, media_type: Optional[str] = None) -> str:
     role = role.lower()
+    media_type = _normalize_media_type(media_type, role)
     if role == 'director':
-        return f'Who directed the film {title}?'
+        target_type = 'film' if media_type in {'film', 'show', 'play', 'series'} else media_type
+        return f'Who directed the {target_type} {title}?'
     if role == 'composer':
-        return f'Who composed the music for the film {title}?'
+        if media_type == 'song':
+            return f'Who composed the song {title}?'
+        target_type = 'film' if media_type in {'film', 'movie'} else media_type
+        return f'Who composed the music for the {target_type} {title}?'
     if role == 'performer':
         return f'Who performed the song {title}?'
-    return f'Who is the {role} of {title}?'
+    return f'Who is the {role} of the {media_type} {title}?'
 
 
-def _extract_role_attribute_question(query: str) -> Optional[Tuple[str, str, str]]:
+def _extract_role_attribute_question(query: str) -> Optional[Tuple[str, str, str, str]]:
     patterns = [
-        r'^What nationality is the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
-        r'^Which country is the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?) from\?$',
-        r'^Where was the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?) born\?$',
-        r'^When was the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?) born\?$',
-        r'^What is the date of birth of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
-        r'^Where did the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?) die\?$',
-        r'^When did the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?) die\?$',
-        r'^What is the date of death of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
+        r'^What nationality is the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
+        r'^Which country is the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?) from\?$',
+        r'^Where was the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?) born\?$',
+        r'^When was the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?) born\?$',
+        r'^What is the date of birth of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
+        r'^Where did the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?) die\?$',
+        r'^When did the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?) die\?$',
+        r'^What is the date of death of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series) (?P<title>.+?)\?$',
     ]
     for pattern in patterns:
         match = re.match(pattern, query, flags=re.IGNORECASE)
@@ -250,7 +314,12 @@ def _extract_role_attribute_question(query: str) -> Optional[Tuple[str, str, str
             attr = 'date_of_death'
         else:
             attr = 'place_of_death'
-        return match.group('role').lower(), match.group('title').strip(), attr
+        return (
+            match.group('role').lower(),
+            match.group('title').strip(),
+            attr,
+            _normalize_media_type(match.group('media_type'), match.group('role').lower()),
+        )
     return None
 
 
@@ -316,15 +385,20 @@ def _extract_direct_relation_query(query: str) -> Optional[Tuple[str, str]]:
     return None
 
 
-def _extract_role_relation_question(query: str) -> Optional[Tuple[str, str, str]]:
+def _extract_role_relation_question(query: str) -> Optional[Tuple[str, str, str, str]]:
     patterns = [
-        r'^Who is the (?P<relation>father|mother|child|son|daughter|spouse|husband|wife) of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series)\s+(?P<title>.+?)\?$',
-        r'^Who is the (?P<relation>child|son|daughter) of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?:film|movie|song|album|show|play|series)\s+(?P<title>.+?)\?$',
+        r'^Who is the (?P<relation>father|mother|child|son|daughter|spouse|husband|wife) of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series)\s+(?P<title>.+?)\?$',
+        r'^Who is the (?P<relation>child|son|daughter) of the (?P<role>director|composer|performer) of (?:(?:the|a) )?(?P<media_type>film|movie|song|album|show|play|series)\s+(?P<title>.+?)\?$',
     ]
     for pattern in patterns:
         match = re.match(pattern, query, flags=re.IGNORECASE)
         if match:
-            return match.group('relation').lower(), match.group('role').lower(), match.group('title').strip()
+            return (
+                match.group('relation').lower(),
+                match.group('role').lower(),
+                match.group('title').strip(),
+                _normalize_media_type(match.group('media_type'), match.group('role').lower()),
+            )
     return None
 
 
@@ -428,17 +502,17 @@ class CoRagAgent:
 
         role_relation = _extract_role_relation_question(query)
         if role_relation:
-            relation, role, title = role_relation
+            relation, role, title, media_type = role_relation
             if step == 0:
-                return _role_query(role, title)
+                return _role_query(role, title, media_type)
             if step == 1 and past_subanswers:
                 return f"Who is {_clean_answer_entity(past_subanswers[0])}'s {relation}?"
 
         role_attribute = _extract_role_attribute_question(query)
         if role_attribute:
-            role, title, attr = role_attribute
+            role, title, attr, media_type = role_attribute
             if step == 0:
-                return _role_query(role, title)
+                return _role_query(role, title, media_type)
             if step == 1:
                 entity = _clean_answer_entity(past_subanswers[0]) if past_subanswers else ''
                 return _attribute_query(entity, attr)
@@ -454,11 +528,14 @@ class CoRagAgent:
                 role = 'composer'
             elif 'performer' in lowered:
                 role = 'performer'
+            shared_media_type = _comparison_role_media_type(query, role) if role else None
+            left_media_type = _extract_media_type(left) or shared_media_type
+            right_media_type = _extract_media_type(right) or shared_media_type
             if role:
                 if step == 0:
-                    return _role_query(role, left)
+                    return _role_query(role, left, left_media_type)
                 if step == 1:
-                    return _role_query(role, right)
+                    return _role_query(role, right, right_media_type)
                 if step == 2 and len(past_subanswers) >= 1:
                     return _attribute_query(_clean_answer_entity(past_subanswers[0]), attr)
                 if step == 3 and len(past_subanswers) >= 2:
@@ -679,18 +756,27 @@ class CoRagAgent:
             max_message_length: int = 4096,
             documents: Optional[List[str]] = None, **kwargs
     ) -> str:
+        normalized_subanswers = [_normalize_subanswer(sa or '') for sa in (corag_sample.past_subanswers or [])]
         # If every intermediate step failed retrieval, avoid parametric hallucination.
-        if corag_sample.past_subanswers and all(
-                'no relevant information found' in (sa or '').lower() for sa in corag_sample.past_subanswers
-        ):
+        if normalized_subanswers and all(answer == 'No relevant information found' for answer in normalized_subanswers):
             return 'No relevant information found'
-        if _extract_comparison_entities(corag_sample.query):
-            non_empty = [
-                sa for sa in (corag_sample.past_subanswers or [])
-                if sa and 'no relevant information found' not in sa.lower()
-            ]
+        comparison = _extract_comparison_entities(corag_sample.query)
+        if comparison:
+            non_empty = [sa for sa in normalized_subanswers if sa and sa != 'No relevant information found']
             if len(non_empty) < 2:
                 return 'insufficient information'
+        else:
+            required_fact_steps = 1
+            if _extract_role_relation_question(corag_sample.query) or _extract_role_attribute_question(corag_sample.query):
+                required_fact_steps = 2
+            elif _extract_possessive_relation_attribute(corag_sample.query):
+                required_fact_steps = 2
+            elif self._dataset_specific_rules_enabled() and self._minimum_dataset_specific_steps(corag_sample.query) > 1:
+                required_fact_steps = 2
+
+            informative_answers = [sa for sa in normalized_subanswers if sa and sa != 'No relevant information found']
+            if normalized_subanswers and len(informative_answers) < required_fact_steps:
+                return 'No relevant information found'
 
         messages: List[Dict] = get_generate_final_answer_prompt(
             query=corag_sample.query,

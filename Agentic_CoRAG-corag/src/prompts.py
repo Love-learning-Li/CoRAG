@@ -18,6 +18,7 @@ Rules:
 - For kinship questions, first resolve the directly needed relative, then ask for the next relation on that resolved person.
 - For comparison questions (e.g., "Are both X and Y from the same country?"), ask for the SAME canonical attribute (e.g., country name) for each entity separately. When asking about country, ask at the country level—not city, state, or province.
 - For "[attribute] of [role] of [entity]" questions (e.g., "What nationality is the director of film X?", "Where did the composer of song Y die?"), FIRST resolve who the role is (ask "Who is the director of film X?"), THEN ask for the attribute of the resolved person. Do NOT try to answer the attribute directly in the first step.
+- Preserve the work type when resolving a role-holder. For example, "composer of song X" must stay a song query, while "director of film X" must stay a film query.
 - If a previous intermediate answer is "No relevant information found", rephrase the SAME question using alternative keywords or a more specific variant (e.g., use past tense, add context clues). Do NOT ask a completely different or unrelated question.
 - If a previous intermediate answer lists MULTIPLE plausible candidates, do NOT arbitrarily pick one candidate for the next hop. First ask a more specific disambiguating question about the SAME role/entity.
 - NEVER ask malformed attribute questions such as "Who is the nationality of X?" or "Who is the country of origin for X?". Use canonical forms like "What nationality is X?" and "Which country is X from?".
